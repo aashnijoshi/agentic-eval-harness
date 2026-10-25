@@ -115,6 +115,12 @@ Execution proceeds in two separate containers:
    Bash uses the digest-pinned Python base. Python grading reuses a separate
    instance of the already-built Python runtime, which supplies locked pytest.
    No package installation or networking is needed during execution.
+   Runtime inspection uses the canonical `python@sha256:…` reference reported
+   in Docker's `RepoDigests`. On Docker Desktop 29.9.2, the equivalent
+   `python:3.11-slim@sha256:…` lookup intermittently returned "No such image"
+   while the pinned image was present. The digest is unchanged; there is no
+   automatic pull, delay, or retry. The daemon's intermittent alias behavior
+   remains unexplained.
    Python's preparation script adds a backward-compatible `--skip-install`
    option; default standalone installation behavior is unchanged.
 2. Only those initial workspace files and the public task prompt go into an
