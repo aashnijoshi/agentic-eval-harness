@@ -68,6 +68,74 @@ repositories can publish newer system packages. Preserve a built image by its
 image ID/digest when an exact runtime snapshot is required. Other CPU
 architectures and live model-provider calls have not been tested.
 
+### Execute and grade bash-001 in Docker
+
+The harness currently supports one task, synchronously: `bash-001` from
+`bash-operations`, using the mini-swe-agent runtime built above. This command
+uses mini's built-in deterministic model, so it needs no API key or paid calls:
+
+```bash
+uv run harness run --agent agents/mini-swe-agent --benchmark bash-operations --task_ids bash-001 --replay tests/fixtures/bash_001_responses.json
+```
+
+The JSON response includes `task_id`, `execution_status`, `agent_status`,
+`passed`, `score`, and `duration_seconds`. Diagnostics include the prompt loaded
+from the dataset, mini's messages and model-call count, collected artifact
+previews/hashes, grading details, image IDs, and any failure phase/error.
+The fixture scripts responses for mini; it does not bypass the agent loop or
+the grader. Its expected result is `Submitted`, `passed: true`, and `score: 1.0`.
+
+Execution proceeds in two separate containers:
+
+1. A trusted, digest-pinned Python container receives the unchanged benchmark
+   setup/evaluator scripts and dataset. The original setup script prepares its
+   initial workspace.
+2. Only those initial workspace files and the public task prompt go into an
+   isolated Alpine mini container. The grader and dataset are never copied into
+   that container. Replay runs have networking disabled.
+3. After mini finishes, its container is stopped before the declared artifact is
+   copied out. Tar paths and file types are checked; links and special files are
+   rejected. Artifacts are limited to 1 MiB and 100 archive entries.
+4. The original evaluator runs against the copied submission in the trusted
+   container, with its original JSON and exit-code conventions. A wrong solution
+   is a completed execution with a failed grade, not an infrastructure error.
+5. Context managers remove both containers and host temporary directories on
+   success, exceptions, timeouts, and keyboard interruption. No volumes or host
+   repository mounts are used. Cleanup errors are reported explicitly.
+
+Exit codes are 0 for a passing task, 1 for a failed grade, and 2 for execution
+failure (including timeout/interruption). Configuration errors also return a
+nonzero exit code. If no valid grade was obtained, `passed` and `score` are null.
+
+```bash
+# Unit/contract tests; Docker is not required.
+uv run pytest tests/test_execution.py -q
+
+# Real Docker execution, still entirely offline and free of model API calls.
+RUN_DOCKER_TESTS=1 uv run pytest tests/test_docker_execution.py -q
+
+# Both suites; integration tests are skipped unless explicitly enabled.
+uv run pytest tests -q
+```
+
+A live model path is also available, but has not been tested or called during
+development. It requires `--model PROVIDER/MODEL` instead of `--replay` and a
+provider key already in the environment. Use `--api-key-env ANTHROPIC_API_KEY`
+for an Anthropic key, for example; the default is `OPENAI_API_KEY`. Only the named
+key is forwarded, by variable name rather than its value in command arguments.
+Known key values are redacted from returned diagnostics. Live runs enable the
+agent container's outbound network access. The default limits are 60 seconds,
+20 model calls, and an estimated $1 model cost; they can be changed with
+`--timeout`, `--step-limit`, and `--cost-limit`. Cost checks happen between calls,
+so one call can exceed the configured cost threshold.
+
+This step does not implement persistence, queues, workers, other tasks, or the
+`status`/`results` commands. Images must already be available locally; execution
+does not build or pull them. Full logs/artifacts are not retained on disk; the
+result contains messages, artifact previews, and grader diagnostics. Docker
+daemon failure or an uncatchable process kill can prevent immediate cleanup;
+containers carry an `agentic-harness.execution` label for identification.
+
 ### Configuring mini-swe-agent
 
 Run the setup wizard to configure your default model and API key:

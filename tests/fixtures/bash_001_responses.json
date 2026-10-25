@@ -1,0 +1,5 @@
+[
+  "```bash\nprintf 'Hello World\\n' > hello.txt\n```",
+  "```bash\ncat hello.txt\n```",
+  "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
+]
