@@ -13,7 +13,8 @@ from click.testing import CliRunner
 from agentic_harness import cli, execution
 from agentic_harness.agents import MiniSweAgent
 from agentic_harness.benchmarks import BashOperations, PythonTasks, PROJECT_ROOT
-from agentic_harness.models import RunResult, Task, TaskResult
+from agentic_harness.db import Database
+from agentic_harness.models import Task, TaskResult
 
 RESPONSES = PROJECT_ROOT / "tests/fixtures/bash_001_responses.json"
 
@@ -188,17 +189,17 @@ def test_execution_failure_cleans_both_containers(monkeypatch, failure, status):
     assert "secret-value" not in json.dumps(asdict(result))
 
 
-def test_cli_prints_structured_result(monkeypatch):
-    task = TaskResult("bash-001", "completed", "Submitted", True, 1.0, 0.25)
-    result = RunResult([task], {"total": 1, "passed": 1}, 0.25)
-    monkeypatch.setattr(cli, "run_benchmark", lambda *_: result)
+def test_cli_prints_persisted_run_id(monkeypatch, tmp_path):
+    path = tmp_path / "queue.sqlite3"
+    monkeypatch.setattr(execution, "run_task", lambda *_: pytest.fail("Submission must not execute tasks"))
     output = CliRunner().invoke(cli.cli, [
         "run", "--agent", str(PROJECT_ROOT / "agents/mini-swe-agent"),
         "--benchmark", "bash-operations", "--task_ids", "bash-001",
-        "--replay", str(RESPONSES),
+        "--replay", str(RESPONSES), "--db", str(path),
     ])
     assert output.exit_code == 0, output.output
-    assert json.loads(output.output) == asdict(result)
+    with Database(path) as db:
+        assert db.get_run(output.output.strip())["tasks"][0]["state"] == "queued"
 
 
 @pytest.mark.parametrize("benchmark", [BashOperations(), PythonTasks()])
@@ -318,20 +319,17 @@ def test_interrupt_does_not_launch_remaining_tasks(monkeypatch):
     (PythonTasks, "python-tasks", None),
     (PythonTasks, "python-tasks", "py-002"),
 ])
-def test_cli_selects_one_many_or_all(benchmark_type, name, selection, monkeypatch):
-    called = []
-
-    def run_task(benchmark, agent, task_id):
-        called.append(task_id)
-        return TaskResult(task_id, "completed", "Submitted", True, 1.0)
-
-    monkeypatch.setattr(execution, "run_task", run_task)
+def test_cli_selects_one_many_or_all(benchmark_type, name, selection, monkeypatch, tmp_path):
+    path = tmp_path / "queue.sqlite3"
+    monkeypatch.setattr(execution, "run_task", lambda *_: pytest.fail("Submission must not execute tasks"))
     arguments = ["run", "--agent", str(PROJECT_ROOT / "agents/mini-swe-agent"),
-                 "--benchmark", name, "--replay", str(RESPONSES)]
+                 "--benchmark", name, "--replay", str(RESPONSES), "--db", str(path)]
     if selection is not None:
         arguments.extend(["--task_ids", selection])
     output = CliRunner().invoke(cli.cli, arguments)
     assert output.exit_code == 0, output.output
     expected = benchmark_type().task_ids() if selection is None else [item.strip() for item in selection.split(",")]
-    assert called == expected
-    assert json.loads(output.output)["summary"]["passed"] == len(expected)
+    with Database(path) as db:
+        run = db.get_run(output.output.strip())
+    assert run["task_ids"] == expected
+    assert all(task["state"] == "queued" for task in run["tasks"])

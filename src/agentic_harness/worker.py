@@ -1,4 +1,4 @@
-"""Bounded local POSIX processes. Python API only; no public asynchronous CLI."""
+"""Bounded local POSIX processes and cleanup-aware queue coordination."""
 
 import fcntl
 import multiprocessing
