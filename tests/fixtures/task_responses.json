@@ -1,0 +1,35 @@
+{
+  "bash-001": [
+    "```bash\nprintf 'Hello World\\n' > hello.txt\n```",
+    "```bash\ncat hello.txt\n```",
+    "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
+  ],
+  "bash-002": [
+    "```bash\ntest ! -e hello.txt && mkdir test_dir && touch test_dir/file1.txt test_dir/file2.txt test_dir/file3.txt\n```",
+    "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
+  ],
+  "bash-003": [
+    "```bash\ncat input.txt && awk 'END {print NR}' input.txt > count.txt\n```",
+    "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
+  ],
+  "bash-004": [
+    "```bash\ntest -f script.sh && test -f data.csv && printf '%s\\n' *.txt > txt_files.txt\n```",
+    "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
+  ],
+  "bash-005": [
+    "```bash\nseq 1 10 > numbers.txt\n```",
+    "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
+  ],
+  "py-001": [
+    "```bash\ntest ! -e test_solution.py && test ! -e /prepared && test ! -e /trusted && test -f solution.py && cat > solution.py <<'PY'\ndef add():\n    return 4\nPY\n```",
+    "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
+  ],
+  "py-002": [
+    "```bash\ntest ! -e test_solution.py && test ! -e /prepared && test ! -e /trusted && test -f solution.py && cat > solution.py <<'PY'\ndef fibonacci(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\nPY\n```",
+    "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
+  ],
+  "py-003": [
+    "```bash\ntest ! -e test_solution.py && test ! -e /prepared && test ! -e /trusted && test -f solution.py && cat > solution.py <<'PY'\ndef get_nth(lst, n):\n    return lst[n] if 0 <= n < len(lst) else None\nPY\n```",
+    "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
+  ]
+}

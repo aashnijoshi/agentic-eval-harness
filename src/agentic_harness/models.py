@@ -13,6 +13,7 @@ class Task:
     instructions: str
     docker_image: str
     artifacts: tuple[str, ...]
+    files_only: bool = False
 
 
 @dataclass
@@ -44,18 +45,25 @@ class TaskResult:
     diagnostics: dict = field(default_factory=dict)
 
 
+@dataclass
+class RunResult:
+    results: list[TaskResult]
+    summary: dict
+    duration_seconds: float
+
+
 class Agent(Protocol):
-    image: str
-    base_image: str
     network: str
     secrets: tuple[str, ...]
 
+    def image_for(self, task: Task) -> str: ...
     def run(self, container: "Container", task: Task) -> AgentResult: ...
 
 
 class Benchmark(Protocol):
     grader_image: str
 
+    def task_ids(self) -> list[str]: ...
     def load_task(self, task_id: str) -> Task: ...
     def prepare(self, container: "Container", task: Task) -> str: ...
     def evaluate(self, container: "Container", task: Task) -> Grade: ...

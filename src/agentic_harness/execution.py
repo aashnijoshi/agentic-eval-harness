@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory, TemporaryFile
 from uuid import uuid4
 
-from agentic_harness.models import Agent, Benchmark, TaskResult
+from agentic_harness.models import Agent, Benchmark, RunResult, TaskResult
 
 OUTPUT_LIMIT = 4 * 1024 * 1024
 ARTIFACT_LIMIT = 1024 * 1024
@@ -24,12 +24,12 @@ class ExecutionTimeout(ExecutionError):
     pass
 
 
-def docker(arguments: list[str], *, input: str | None = None, timeout=30, check=True):
+def docker(arguments: list[str], *, input: str | bytes | None = None, timeout=30, check=True):
     # Spool command output to temporary files instead of buffering it in memory.
     with TemporaryFile() as stdout, TemporaryFile() as stderr:
         try:
             process = subprocess.run(
-                ["docker", *arguments], input=input.encode() if input is not None else None,
+                ["docker", *arguments], input=input.encode() if isinstance(input, str) else input,
                 stdout=stdout, stderr=stderr, timeout=timeout,
             )
         except subprocess.TimeoutExpired as error:
@@ -116,8 +116,23 @@ class Container:
         )
 
     def copy_in(self, source: Path, target: str):
-        path = f"{source}/." if source.is_dir() else str(source)
-        docker(["cp", path, f"{self.name}:{target}"])
+        # Host UID/GID would make seeded files unwritable under --cap-drop ALL.
+        # Normalize ownership in the archive instead of granting extra capabilities.
+        def container_owner(member):
+            member.uid = member.gid = 0
+            member.uname = member.gname = "root"
+            return member
+
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            if source.is_dir():
+                for child in source.iterdir():
+                    tar.add(child, arcname=child.name, filter=container_owner)
+                destination = target
+            else:
+                tar.add(source, arcname=PurePosixPath(target).name, filter=container_owner)
+                destination = str(PurePosixPath(target).parent)
+        docker(["cp", "-", f"{self.name}:{destination}"], input=archive.getvalue())
 
     def copy_out(self, source: str, directory: Path, *, missing_ok=False):
         result = docker(["cp", f"{self.name}:{source}", "-"], check=False)
@@ -147,8 +162,7 @@ def redact(value, secrets):
 
 def run_task(benchmark: Benchmark, agent: Agent, task_id: str) -> TaskResult:
     task = benchmark.load_task(task_id)
-    if task.docker_image != agent.base_image:
-        raise ValueError(f"Agent runtime does not match task base image {task.docker_image}")
+    image = agent.image_for(task)
     started = time.monotonic()
     execution_id = uuid4().hex
     result = TaskResult(task_id, diagnostics={
@@ -156,7 +170,7 @@ def run_task(benchmark: Benchmark, agent: Agent, task_id: str) -> TaskResult:
         "base_image": task.docker_image,
     })
     trusted = Container(benchmark.grader_image, execution_id, "trusted")
-    sandbox = Container(agent.image, execution_id, "agent", network=agent.network)
+    sandbox = Container(image, execution_id, "agent", network=agent.network)
     phase = "setup"
     try:
         with TemporaryDirectory(prefix="harness-") as temporary:
@@ -177,14 +191,23 @@ def run_task(benchmark: Benchmark, agent: Agent, task_id: str) -> TaskResult:
                         raise ExecutionError(outcome.error or "Agent execution failed")
                     phase = "artifacts"
                     for path in task.artifacts:
-                        sandbox.copy_out(f"/workspace/{path}", artifacts, missing_ok=True)
+                        # docker cp archives a file by basename; preserve its declared parent.
+                        destination = artifacts / PurePosixPath(path).parent
+                        destination.mkdir(parents=True, exist_ok=True)
+                        sandbox.copy_out(f"/workspace/{path}", destination, missing_ok=True)
+                        if task.files_only and (artifacts / path).is_dir():
+                            raise ExecutionError(f"Solution artifact must be a regular file: {path}")
+                entries = list(artifacts.rglob("*"))
+                files = [path for path in entries if path.is_file()]
+                if len(entries) > 100 or sum(path.stat().st_size for path in files) > ARTIFACT_LIMIT:
+                    raise ExecutionError("Submission exceeds artifact limits")
                 result.diagnostics["artifacts"] = {
                     str(path.relative_to(artifacts)): {
                         "size_bytes": path.stat().st_size,
                         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                         "preview": path.read_bytes()[:4096].decode(errors="replace"),
                     }
-                    for path in artifacts.rglob("*") if path.is_file()
+                    for path in files
                 }
                 phase = "grading"
                 trusted.execute(["mkdir", "-p", "/submission"])
@@ -215,3 +238,40 @@ def run_task(benchmark: Benchmark, agent: Agent, task_id: str) -> TaskResult:
         result.execution_status = "error"
     result.diagnostics = redact(result.diagnostics, agent.secrets)
     return result
+
+
+def run_benchmark(benchmark: Benchmark, agent: Agent, task_ids: list[str] | None = None) -> RunResult:
+    """Validate selection first, then execute independent tasks sequentially."""
+    selected = benchmark.task_ids() if task_ids is None else task_ids
+    if not selected or len(selected) != len(set(selected)):
+        raise ValueError("Select at least one task, with no duplicate task IDs")
+    for task_id in selected:
+        task = benchmark.load_task(task_id)
+        agent.image_for(task)
+    started = time.monotonic()
+    results = []
+    interrupted = False
+    for task_id in selected:
+        if interrupted:
+            result = TaskResult(task_id, execution_status="interrupted", diagnostics={
+                "error": "Not started because the run was interrupted",
+            })
+        else:
+            result = run_task(benchmark, agent, task_id)
+            interrupted = result.execution_status == "interrupted"
+        results.append(result)
+    graded = sum(result.passed is not None for result in results)
+    passed = sum(result.passed is True for result in results)
+    summary = {
+        "total": len(selected),
+        "completed": sum(result.execution_status == "completed" for result in results),
+        "graded": graded,
+        "passed": passed,
+        "failed": sum(result.passed is False for result in results),
+        "errors": sum(result.execution_status == "error" for result in results),
+        "timed_out": sum(result.execution_status == "timed_out" for result in results),
+        "interrupted": sum(result.execution_status == "interrupted" for result in results),
+        "accuracy": passed / len(selected),
+        "graded_accuracy": passed / graded if graded else None,
+    }
+    return RunResult(results, summary, round(time.monotonic() - started, 3))

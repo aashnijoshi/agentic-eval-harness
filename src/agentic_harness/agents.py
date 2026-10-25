@@ -10,8 +10,10 @@ from agentic_harness.models import AgentResult, Task
 
 
 class MiniSweAgent:
-    image = "harness-mini:alpine"
-    base_image = "alpine:latest"
+    runtimes = {
+        "alpine:latest": "harness-mini:alpine",
+        "python:3.11-slim": "harness-mini:python",
+    }
 
     def __init__(
         self, *, model: str | None = None, replay: Path | None = None,
@@ -30,10 +32,17 @@ class MiniSweAgent:
         self.secrets = ()
         if replay is not None:
             self.responses = json.loads(replay.read_text())
-            if not isinstance(self.responses, list) or not self.responses or not all(
-                isinstance(item, str) for item in self.responses
+            if isinstance(self.responses, dict):
+                if not self.responses or not all(isinstance(key, str) and key for key in self.responses):
+                    raise ValueError("Replay mapping must have nonempty task ID keys")
+                batches = self.responses.values()
+            else:
+                batches = [self.responses]
+            if not all(
+                isinstance(batch, list) and batch and all(isinstance(item, str) for item in batch)
+                for batch in batches
             ):
-                raise ValueError("Replay file must contain a nonempty JSON list of responses")
+                raise ValueError("Replay must be a response list or a task-ID-to-response-list mapping")
         else:
             if not re.fullmatch(r"[A-Z][A-Z0-9_]*", api_key_env):
                 raise ValueError("Invalid API key environment variable name")
@@ -48,10 +57,21 @@ class MiniSweAgent:
         self.cost_limit = cost_limit
         self.network = "none" if replay is not None else "bridge"
 
+    def image_for(self, task: Task) -> str:
+        try:
+            return self.runtimes[task.docker_image]
+        except KeyError as error:
+            raise ValueError(f"No mini runtime for declared image {task.docker_image}") from error
+
     def run(self, container, task: Task) -> AgentResult:
+        responses = self.responses
+        if isinstance(responses, dict):
+            if task.task_id not in responses:
+                raise ValueError(f"No replay responses for task {task.task_id}")
+            responses = responses[task.task_id]
         container.copy_in(Path(__file__).with_name("mini_runner.py"), "/mini_runner.py")
         request = {
-            "task": task.instructions, "model": self.model, "responses": self.responses,
+            "task": task.instructions, "model": self.model, "responses": responses,
             "step_limit": self.step_limit, "cost_limit": self.cost_limit,
         }
         process = container.execute(

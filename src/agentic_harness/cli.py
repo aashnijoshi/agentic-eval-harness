@@ -7,8 +7,8 @@ from pathlib import Path
 import click
 
 from agentic_harness.agents import MiniSweAgent
-from agentic_harness.benchmarks import BashOperations, PROJECT_ROOT
-from agentic_harness.execution import run_task
+from agentic_harness.benchmarks import BashOperations, PythonTasks, PROJECT_ROOT
+from agentic_harness.execution import run_benchmark
 
 
 @click.group()
@@ -26,12 +26,13 @@ def cli():
 @click.option(
     "--benchmark",
     required=True,
-    help="Name of the benchmark to run (e.g., swebench)",
+    type=click.Choice(["bash-operations", "python-tasks"]),
+    help="Benchmark to execute",
 )
 @click.option(
     "--task_ids",
     default=None,
-    help="Task IDs (this implementation step requires bash-001)",
+    help="Comma-separated task IDs; omit to run all tasks in the benchmark",
 )
 @click.option("--model", default=None, help="Explicit provider/model name for a live run")
 @click.option("--replay", type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -41,25 +42,23 @@ def cli():
 @click.option("--step-limit", type=click.IntRange(min=1), default=20, show_default=True)
 @click.option("--cost-limit", type=click.FloatRange(min=0, min_open=True), default=1.0, show_default=True)
 def run(agent, benchmark, task_ids, model, replay, api_key_env, timeout, step_limit, cost_limit):
-    """Execute and grade bash-001 synchronously, returning JSON."""
+    """Execute selected benchmark tasks sequentially, returning results and summary."""
     if Path(agent).resolve() != PROJECT_ROOT / "agents/mini-swe-agent":
         raise click.BadParameter("Only agents/mini-swe-agent is supported", param_hint="--agent")
-    if benchmark != "bash-operations":
-        raise click.BadParameter("Only bash-operations is supported", param_hint="--benchmark")
-    if not task_ids or task_ids.strip() != "bash-001":
-        raise click.BadParameter("Specify bash-001 for this implementation step", param_hint="--task_ids")
     try:
+        benchmark_adapter = BashOperations() if benchmark == "bash-operations" else PythonTasks()
+        selected = [item.strip() for item in task_ids.split(",")] if task_ids is not None else None
         adapter = MiniSweAgent(
             model=model, replay=replay, api_key_env=api_key_env,
             timeout=timeout, step_limit=step_limit, cost_limit=cost_limit,
         )
-        result = run_task(BashOperations(), adapter, "bash-001")
+        result = run_benchmark(benchmark_adapter, adapter, selected)
     except (ValueError, OSError) as error:
         raise click.ClickException(str(error)) from error
     click.echo(json.dumps(asdict(result), indent=2, allow_nan=False))
-    if result.execution_status != "completed":
+    if any(task.execution_status != "completed" for task in result.results):
         raise click.exceptions.Exit(2)
-    if not result.passed:
+    if any(not task.passed for task in result.results):
         raise click.exceptions.Exit(1)
 
 

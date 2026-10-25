@@ -7,17 +7,20 @@ import sys
 from pathlib import Path
 
 
-def setup_task(workspace: Path, task_id: str, dataset_path: Path) -> None:
+def setup_task(
+    workspace: Path, task_id: str, dataset_path: Path, *, install_dependencies: bool = True,
+) -> None:
     """Set up workspace for a specific Python task.
 
     Args:
         workspace: Path to workspace directory
         task_id: Task identifier
         dataset_path: Path to dataset.json
+        install_dependencies: Install requirements (default preserves standalone behavior)
     """
     # Install requirements (pytest)
     requirements_path = Path(__file__).parent / "requirements.txt"
-    if requirements_path.exists():
+    if install_dependencies and requirements_path.exists():
         print("Installing requirements...")
         subprocess.run(
             ["pip", "install", "-q", "-r", str(requirements_path)],
@@ -67,6 +70,11 @@ def main():
         help="Path to dataset.json (default: same directory as this script)",
     )
 
+    parser.add_argument(
+        "--skip-install", action="store_true",
+        help="Use dependencies already installed in the execution environment",
+    )
+
     args = parser.parse_args()
 
     workspace = Path(args.workspace)
@@ -74,7 +82,7 @@ def main():
         Path(args.config) if args.config else Path(__file__).parent / "dataset.json"
     )
 
-    setup_task(workspace, args.task_id, config_path)
+    setup_task(workspace, args.task_id, config_path, install_dependencies=not args.skip_install)
 
 
 if __name__ == "__main__":

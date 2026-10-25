@@ -68,44 +68,82 @@ repositories can publish newer system packages. Preserve a built image by its
 image ID/digest when an exact runtime snapshot is required. Other CPU
 architectures and live model-provider calls have not been tested.
 
-### Execute and grade bash-001 in Docker
+### Execute benchmarks synchronously in Docker
 
-The harness currently supports one task, synchronously: `bash-001` from
-`bash-operations`, using the mini-swe-agent runtime built above. This command
-uses mini's built-in deterministic model, so it needs no API key or paid calls:
+All five `bash-operations` tasks and all three `python-tasks` are supported.
+The runtime is selected from each task's declared `docker_image`: Alpine tasks
+use `harness-mini:alpine`, and Python tasks use `harness-mini:python`.
+These commands use mini's built-in deterministic model and need no API key:
 
 ```bash
 uv run harness run --agent agents/mini-swe-agent --benchmark bash-operations --task_ids bash-001 --replay tests/fixtures/bash_001_responses.json
+
+# Multiple selected tasks, in the requested order.
+uv run harness run --agent agents/mini-swe-agent --benchmark bash-operations --task_ids bash-002,bash-003 --replay tests/fixtures/task_responses.json
+
+# Omit task IDs to execute the entire benchmark sequentially.
+uv run harness run --agent agents/mini-swe-agent --benchmark bash-operations --replay tests/fixtures/task_responses.json
+uv run harness run --agent agents/mini-swe-agent --benchmark python-tasks --replay tests/fixtures/task_responses.json
 ```
 
-The JSON response includes `task_id`, `execution_status`, `agent_status`,
-`passed`, `score`, and `duration_seconds`. Diagnostics include the prompt loaded
-from the dataset, mini's messages and model-call count, collected artifact
-previews/hashes, grading details, image IDs, and any failure phase/error.
-The fixture scripts responses for mini; it does not bypass the agent loop or
-the grader. Its expected result is `Submitted`, `passed: true`, and `score: 1.0`.
+Every response has the same shape, including single-task runs: `results` is a
+list of per-task records, `summary` aggregates those records, and
+`duration_seconds` measures the whole run. This replaces the earlier flat
+single-task JSON response. Each task retains `task_id`, `execution_status`,
+`agent_status`, `passed`, `score`, `duration_seconds`, and diagnostics. Diagnostics
+include the dataset-loaded instructions, mini's messages/model-call count,
+artifact previews/hashes, grader details, image IDs, and failure phase/error.
+
+`summary.accuracy` is passed / selected tasks, so infrastructure errors do not
+silently disappear from the denominator. `graded_accuracy` is passed / tasks
+with a valid grade, or null when none were graded. The summary also counts
+completed, graded, passed, failed, errored, timed-out, and interrupted tasks.
+Scores remain the benchmarks' original binary scores. Unknown, empty, or
+duplicate task selections are rejected before any task starts. A failed grade,
+agent error, or timeout does not stop later selected tasks. Ctrl-C interrupts
+the current task and marks remaining tasks interrupted without starting them.
+
+Replay files may contain a response list (reused independently for each task)
+or a mapping from task IDs to response lists. The all-task fixture uses the
+mapping form. These are scripted responses to the real mini agent; they do not
+bypass its loop or the grader. No solutions or task IDs are embedded in harness
+production code. Each fixture task is expected to submit and score 1.0.
 
 Execution proceeds in two separate containers:
 
-1. A trusted, digest-pinned Python container receives the unchanged benchmark
-   setup/evaluator scripts and dataset. The original setup script prepares its
-   initial workspace.
+1. A fresh trusted Python container receives the benchmark's scripts and dataset.
+   Bash uses the digest-pinned Python base. Python grading reuses a separate
+   instance of the already-built Python runtime, which supplies locked pytest.
+   No package installation or networking is needed during execution.
+   Python's preparation script adds a backward-compatible `--skip-install`
+   option; default standalone installation behavior is unchanged.
 2. Only those initial workspace files and the public task prompt go into an
-   isolated Alpine mini container. The grader and dataset are never copied into
-   that container. Replay runs have networking disabled.
+   isolated mini container using the declared image family. Bash setup files are
+   preserved. Python preparation creates tests and a solution stub in the trusted
+   container, but copies only the stub to the agent workspace. The grader,
+   dataset, and Python tests are never copied into the agent container. Replay
+   runs have networking disabled. Each task gets new containers and directories.
+   Copy-in archives normalize ownership to container UID/GID 0 so initial files
+   remain editable with all container capabilities dropped.
 3. After mini finishes, its container is stopped before the declared artifact is
    copied out. Tar paths and file types are checked; links and special files are
-   rejected. Artifacts are limited to 1 MiB and 100 archive entries.
+   rejected. Nested artifact paths are preserved. Artifacts are limited to 1 MiB
+   and 100 entries across the submission. Python accepts only its declared
+   solution file, excluding agent-created tests and pytest configuration files.
 4. The original evaluator runs against the copied submission in the trusted
-   container, with its original JSON and exit-code conventions. A wrong solution
-   is a completed execution with a failed grade, not an infrastructure error.
+   container's clean submission directory. Python tests are copied there from
+   trusted preparation immediately before grading. Both benchmarks' JSON and
+   exit-code conventions are preserved: Python's grader exits zero even for
+   failed solutions. A wrong solution is a completed execution with a failed
+   grade, not an infrastructure error. The supplied grader code is unchanged.
 5. Context managers remove both containers and host temporary directories on
    success, exceptions, timeouts, and keyboard interruption. No volumes or host
    repository mounts are used. Cleanup errors are reported explicitly.
 
-Exit codes are 0 for a passing task, 1 for a failed grade, and 2 for execution
-failure (including timeout/interruption). Configuration errors also return a
-nonzero exit code. If no valid grade was obtained, `passed` and `score` are null.
+Exit codes are 0 when all selected tasks pass, 1 when at least one grade fails,
+and 2 when any task has an execution error, timeout, or interruption.
+Configuration errors also return a nonzero exit code. If a task obtained no
+valid grade, its `passed` and `score` are null.
 
 ```bash
 # Unit/contract tests; Docker is not required.
@@ -129,12 +167,19 @@ agent container's outbound network access. The default limits are 60 seconds,
 `--timeout`, `--step-limit`, and `--cost-limit`. Cost checks happen between calls,
 so one call can exceed the configured cost threshold.
 
-This step does not implement persistence, queues, workers, other tasks, or the
+This step does not implement persistence, queues, workers, or the
 `status`/`results` commands. Images must already be available locally; execution
 does not build or pull them. Full logs/artifacts are not retained on disk; the
 result contains messages, artifact previews, and grader diagnostics. Docker
 daemon failure or an uncatchable process kill can prevent immediate cleanup;
 containers carry an `agentic-harness.execution` label for identification.
+
+Known benchmark limitations are preserved: `bash-003` has five logical lines but
+no trailing newline (`wc -l` alone returns four), and bash substring/existence
+checks remain as supplied. Python grading executes submitted Python code in an
+isolated container; withholding test files prevents editing them during agent
+execution, but the provided pytest grader is not a hardened checker against
+malicious code that manipulates pytest from inside its own Python process.
 
 ### Configuring mini-swe-agent
 
