@@ -1,0 +1,15 @@
+# Only send dependency metadata, upstream agent source, and the smoke test.
+**
+!pyproject.toml
+!uv.lock
+!agents/
+!agents/mini-swe-agent/
+!agents/mini-swe-agent/pyproject.toml
+!agents/mini-swe-agent/README.md
+!agents/mini-swe-agent/LICENSE.md
+!agents/mini-swe-agent/src/
+!agents/mini-swe-agent/src/**
+!docker/
+!docker/smoke_test.py
+**/__pycache__/
+**/*.egg-info/
