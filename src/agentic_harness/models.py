@@ -52,6 +52,24 @@ class RunResult:
     duration_seconds: float
 
 
+def summarize_results(results: list[TaskResult], total: int) -> dict:
+    """Summarize available results against all selected tasks, including pending ones."""
+    graded = sum(result.passed is not None for result in results)
+    passed = sum(result.passed is True for result in results)
+    return {
+        "total": total,
+        "completed": sum(result.execution_status == "completed" for result in results),
+        "graded": graded,
+        "passed": passed,
+        "failed": sum(result.passed is False for result in results),
+        "errors": sum(result.execution_status == "error" for result in results),
+        "timed_out": sum(result.execution_status == "timed_out" for result in results),
+        "interrupted": sum(result.execution_status == "interrupted" for result in results),
+        "accuracy": passed / total if total else 0.0,
+        "graded_accuracy": passed / graded if graded else None,
+    }
+
+
 class Agent(Protocol):
     network: str
     secrets: tuple[str, ...]

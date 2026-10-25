@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory, TemporaryFile
 from uuid import uuid4
 
-from agentic_harness.models import Agent, Benchmark, RunResult, TaskResult
+from agentic_harness.models import Agent, Benchmark, RunResult, TaskResult, summarize_results
 
 OUTPUT_LIMIT = 4 * 1024 * 1024
 ARTIFACT_LIMIT = 1024 * 1024
@@ -260,18 +260,5 @@ def run_benchmark(benchmark: Benchmark, agent: Agent, task_ids: list[str] | None
             result = run_task(benchmark, agent, task_id)
             interrupted = result.execution_status == "interrupted"
         results.append(result)
-    graded = sum(result.passed is not None for result in results)
-    passed = sum(result.passed is True for result in results)
-    summary = {
-        "total": len(selected),
-        "completed": sum(result.execution_status == "completed" for result in results),
-        "graded": graded,
-        "passed": passed,
-        "failed": sum(result.passed is False for result in results),
-        "errors": sum(result.execution_status == "error" for result in results),
-        "timed_out": sum(result.execution_status == "timed_out" for result in results),
-        "interrupted": sum(result.execution_status == "interrupted" for result in results),
-        "accuracy": passed / len(selected),
-        "graded_accuracy": passed / graded if graded else None,
-    }
+    summary = summarize_results(results, len(selected))
     return RunResult(results, summary, round(time.monotonic() - started, 3))

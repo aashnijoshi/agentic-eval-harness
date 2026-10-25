@@ -167,8 +167,8 @@ agent container's outbound network access. The default limits are 60 seconds,
 `--timeout`, `--step-limit`, and `--cost-limit`. Cost checks happen between calls,
 so one call can exceed the configured cost threshold.
 
-This step does not implement persistence, queues, workers, or the
-`status`/`results` commands. Images must already be available locally; execution
+The CLI remains synchronous; background workers and the
+`status`/`results` commands are not implemented. Images must already be available locally; execution
 does not build or pull them. Full logs/artifacts are not retained on disk; the
 result contains messages, artifact previews, and grader diagnostics. Docker
 daemon failure or an uncatchable process kill can prevent immediate cleanup;
@@ -180,6 +180,110 @@ checks remain as supplied. Python grading executes submitted Python code in an
 isolated container; withholding test files prevents editing them during agent
 execution, but the provided pytest grader is not a hardened checker against
 malicious code that manipulates pytest from inside its own Python process.
+
+### SQLite persistence and durable queue (Python API)
+
+`agentic_harness.db.Database` adds persistence independently of the CLI and
+Docker execution. It uses standard-library SQLite with two tables:
+
+| Table | Fields and purpose |
+| --- | --- |
+| `runs` | UUID `run_id`; canonical `agent` and `benchmark` identifiers; `task_ids_json` preserving the selected task list; `config_json` containing explicit execution settings; UTC `created_at` for submission order. |
+| `task_executions` | UUID `task_execution_id`; foreign-key `run_id`; `task_id` and selection `position`; execution `state`; `worker_id` and unique per-claim `claim_token`; UTC `claimed_at`, `started_at`, and `finished_at`; serialized `TaskResult` in `result_json`; optional diagnostic `error`. |
+
+The schema enforces valid states and unique `(run_id, task_id)` and
+`(run_id, position)` pairs. A state index supports queued-task selection; the
+unique indexes also support retrieving a run's tasks. Every connection enables
+foreign keys. Initialization is idempotent. Use one `Database` instance per
+caller/thread, with a context manager or explicit `close()`.
+
+Submission validates the benchmark's real task definitions, the supported agent
+and image families, a provider/model identifier or valid replay file, and the
+execution limits. It inserts the run and every queued task in one transaction;
+any insert failure rolls back the whole submission. Model submission does not
+require credentials to be present yet. Configuration stores only `model`,
+`replay` (an absolute file path), `api_key_env` (a variable name), `timeout`,
+`step_limit`, and `cost_limit`. It never reads or stores environment values or
+serializes agent objects. Arbitrary configuration fields are rejected.
+
+For example, from the project root, this uses a temporary database and does not
+run Docker or call a model. The successful `TaskResult` is illustrative; a
+worker will eventually obtain it from the existing `run_task()` function.
+
+```python
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from agentic_harness.db import Database
+from agentic_harness.models import TaskResult
+
+with TemporaryDirectory() as directory, Database(Path(directory) / "queue.sqlite3") as db:
+    run_id = db.submit_run(
+        agent="agents/mini-swe-agent",
+        benchmark="bash-operations",
+        task_ids=["bash-001", "bash-002"],
+        replay=Path("tests/fixtures/task_responses.json"),
+    )
+    claim = db.claim_next("worker-example")
+    result = TaskResult("bash-001", "completed", "Submitted", True, 1.0)
+    db.finish_task(
+        claim["task_execution_id"], claim["claim_token"], result,
+        worker_id=claim["worker_id"],
+    )
+    print([(task["task_id"], task["state"]) for task in db.get_run(run_id)["tasks"]])
+    # [('bash-001', 'completed'), ('bash-002', 'queued')]
+    print(db.get_results(run_id).summary)
+    # total=2, completed=1, graded=1, passed=1, failed=0,
+    # errors=0, timed_out=0, interrupted=0, accuracy=0.5, graded_accuracy=1.0
+```
+
+`claim_next(worker_id)` uses `BEGIN IMMEDIATE` before selecting the oldest
+queued run and its first selected task. SQLite serializes writers, so a second
+claimer waits for the first transaction to commit, then sees the task as
+running. An empty queue returns `None`. A fresh token is generated per claim,
+and claim/start times are initially equal. The transaction commits before the
+claim is returned: Docker execution must happen outside a database transaction.
+Lock contention waits up to five seconds, then raises a SQLite error to the
+caller without silently retrying work.
+
+`finish_task()` conditionally updates only a running row matching the execution
+ID, task ID, worker ID, and claim token. Invalid results, mismatched ownership,
+stale tokens, and duplicate completion are rejected. Final states are
+`completed`, `error`, `timed_out`, and `interrupted`. An incorrect solution is
+`completed` with `passed=False` and score `0.0`. A grade obtained before a later
+cleanup error is retained, matching synchronous execution. Results from the
+execution layer already redact its known API key values; callers must not add
+secrets to arbitrary result diagnostics.
+
+`get_run()` returns configuration and ordered task states/timestamps without
+exposing claim tokens. `get_results()` returns a `RunResult` with finished
+results in selection order and the same summary calculation as synchronous
+execution. Queued/running tasks have no fabricated result and do not count as
+failed solutions; they remain in the overall accuracy denominator. Graded
+accuracy includes only available grades and is null when none exist. Database
+`duration_seconds` is the sum of persisted task durations, not queue waiting
+time or a run's wall-clock duration.
+
+Crash/recovery policy for Chunk 2B: committed claims survive process exit as
+`running`, with their owner, token, and timestamps intact. Claim age alone never
+requeues work, and there is no retry, lease expiry, heartbeat, or recovery daemon.
+The worker must associate Docker container labels with the durable execution ID
+before launch, handle normal completion/interruption, and recover orphaned work
+only after confirming its worker has stopped and its containers are cleaned up.
+Any explicit recovery must compare the current state/token and revoke ownership
+atomically before recording an interrupted/error outcome, so a late worker cannot
+overwrite it. No recovery or requeue API is exposed in this chunk.
+
+The queue assumes one local SQLite file and the same checkout/replay files are
+available to the future worker. It records configuration references, not copies
+of datasets, source, or replay contents; preserve those files for reproducibility.
+The existing ignore rules exclude SQLite files and their journal sidecars.
+There are no migrations or database/CLI integration yet.
+
+```bash
+uv run pytest tests/test_db.py -q
+RUN_DOCKER_TESTS=1 uv run pytest tests -q
+```
 
 ### Configuring mini-swe-agent
 
