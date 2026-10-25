@@ -6,6 +6,23 @@ A system for running AI agents against benchmark tasks.
 
 ### Installation
 
+Use a Git checkout so `make init` can restore the submodule. If you have the
+original starter ZIP without `.git` and with an empty `agents/mini-swe-agent/`,
+run these commands once from the project root:
+
+```bash
+git init -b main
+git clone --depth 1 --branch v1.17.5 https://github.com/SWE-agent/mini-swe-agent.git agents/mini-swe-agent
+git submodule add https://github.com/SWE-agent/mini-swe-agent.git agents/mini-swe-agent
+git submodule absorbgitdirs
+```
+
+The recovered setup pins mini-swe-agent v1.17.5 at
+`68d367bf0ccf40ad59a07101a94c21b66e7798ff` through the Git submodule entry.
+The ZIP did not preserve the original revision; this compatible v1 release
+supports Python 3.11 and the flags used by the examples. Commit the submodule
+entry along with the project files when preparing the GitHub submission.
+
 ```bash
 make init       # Initialize git submodules (mini-swe-agent)
 make install    # Install dependencies
