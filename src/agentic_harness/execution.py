@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import re
 import subprocess
 import tarfile
 import time
@@ -67,20 +68,24 @@ def extract_artifacts(archive: bytes, directory: Path) -> None:
 
 
 class Container:
-    def __init__(self, image: str, execution_id: str, role: str, *, network="none"):
+    def __init__(self, image: str, execution_id: str, role: str, *, network="none", claim_token=None):
         self.name = f"harness-{execution_id}-{role}"
         self.image = image
         self.execution_id = execution_id
         self.network = network
+        self.claim_token = claim_token
         self.cleanup_errors: list[str] = []
 
     def __enter__(self):
         try:
             # Resolve the tag once so this execution uses a concrete local image ID.
             self.image = docker(["image", "inspect", "--format", "{{.Id}}", self.image]).stdout.decode().strip()
+            labels = ["--label", f"agentic-harness.execution={self.execution_id}"]
+            if self.claim_token is not None:
+                labels.extend(["--label", f"agentic-harness.claim={self.claim_token}"])
             docker([
                 "create", "--name", self.name,
-                "--label", f"agentic-harness.execution={self.execution_id}",
+                *labels,
                 "--network", self.network, "--memory", "512m", "--cpus", "1",
                 "--pids-limit", "128", "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges", "--workdir", "/workspace",
@@ -160,20 +165,26 @@ def redact(value, secrets):
     return value
 
 
-def run_task(benchmark: Benchmark, agent: Agent, task_id: str) -> TaskResult:
+def run_task(
+    benchmark: Benchmark, agent: Agent, task_id: str, *, execution_id: str | None = None,
+    claim_token: str | None = None,
+) -> TaskResult:
+    for value in (execution_id, claim_token):
+        if value is not None and not re.fullmatch(r"[0-9a-f]{32}", value):
+            raise ValueError("Execution IDs and claim tokens must be UUID hex strings")
     task = benchmark.load_task(task_id)
     image = agent.image_for(task)
     started = time.monotonic()
-    execution_id = uuid4().hex
+    execution_id = execution_id or uuid4().hex
     result = TaskResult(task_id, diagnostics={
         "execution_id": execution_id, "instructions": task.instructions,
         "base_image": task.docker_image,
     })
-    trusted = Container(benchmark.grader_image, execution_id, "trusted")
-    sandbox = Container(image, execution_id, "agent", network=agent.network)
+    trusted = Container(benchmark.grader_image, execution_id, "trusted", claim_token=claim_token)
+    sandbox = Container(image, execution_id, "agent", network=agent.network, claim_token=claim_token)
     phase = "setup"
     try:
-        with TemporaryDirectory(prefix="harness-") as temporary:
+        with TemporaryDirectory(prefix=f"harness-{execution_id}-") as temporary:
             initial, artifacts = Path(temporary, "initial"), Path(temporary, "artifacts")
             initial.mkdir()
             artifacts.mkdir()

@@ -173,7 +173,7 @@ agent container's outbound network access. The default limits are 60 seconds,
 `--timeout`, `--step-limit`, and `--cost-limit`. Cost checks happen between calls,
 so one call can exceed the configured cost threshold.
 
-The CLI remains synchronous; background workers and the
+The CLI remains synchronous; its asynchronous submission and
 `status`/`results` commands are not implemented. Images must already be available locally; execution
 does not build or pull them. Full logs/artifacts are not retained on disk; the
 result contains messages, artifact previews, and grader diagnostics. Docker
@@ -270,15 +270,14 @@ accuracy includes only available grades and is null when none exist. Database
 `duration_seconds` is the sum of persisted task durations, not queue waiting
 time or a run's wall-clock duration.
 
-Crash/recovery policy for Chunk 2B: committed claims survive process exit as
+Crash/recovery policy: committed claims survive process exit as
 `running`, with their owner, token, and timestamps intact. Claim age alone never
 requeues work, and there is no retry, lease expiry, heartbeat, or recovery daemon.
-The worker must associate Docker container labels with the durable execution ID
-before launch, handle normal completion/interruption, and recover orphaned work
-only after confirming its worker has stopped and its containers are cleaned up.
-Any explicit recovery must compare the current state/token and revoke ownership
-atomically before recording an interrupted/error outcome, so a late worker cannot
-overwrite it. No recovery or requeue API is exposed in this chunk.
+The worker coordinator below associates Docker labels with durable execution IDs
+and claim tokens. It recovers orphaned work only after confirming worker exit
+and reconciling its containers, then atomically completes the active claim as
+interrupted. The final state prevents late completion from overwriting recovery.
+There is no requeue operation.
 
 The queue assumes one local SQLite file and the same checkout/replay files are
 available to the future worker. It records configuration references, not copies
@@ -288,6 +287,89 @@ There are no migrations or database/CLI integration yet.
 
 ```bash
 uv run pytest tests/test_db.py -q
+RUN_DOCKER_TESTS=1 uv run pytest tests -q
+```
+
+### Local background workers (Python API)
+
+Run the coordinator in a dedicated terminal/process after submitting through
+`Database.submit_run()`. Public async CLI commands are deferred to Chunk 2C.
+
+```python
+from agentic_harness.worker import run_workers
+
+run_workers("runs.sqlite3", concurrency=2)  # Serve until Ctrl-C or SIGTERM.
+# Or: run_workers("runs.sqlite3", concurrency=2, drain=True)
+# Drain executes currently queued work and exits when no queued/active work remains.
+```
+
+The coordinator creates at most `concurrency` child processes. Each child opens
+its own SQLite connection, atomically claims one task, reconstructs the benchmark
+and mini adapter from persisted configuration, calls the existing `run_task()`,
+and finishes its claim with the returned `TaskResult`. It then exits. Connections
+are closed before the coordinator forks; no database transaction spans execution.
+A wrong solution, setup error, timeout, or caught worker exception does not stop
+other queued tasks. A worker failing before it can claim anything stops the
+coordinator rather than causing an endless respawn loop.
+
+An exclusive `flock` on `<database>.worker.lock` permits one coordinator for that
+canonical database path. Symlinks resolve to the same lock; hard-linked databases
+are rejected. Every child inherits the same lock descriptor until it exits, so
+killing the coordinator cannot release the concurrency guard while its children
+are still executing. Orphaned children can finish only their current task, never
+claim another. The sidecar is deliberately not unlinked: unlinking a held lock
+would allow another coordinator to lock a different inode. It is Git-ignored.
+The lock is separate from SQLite because locking the database itself blocked
+SQLite writes in the macOS verification probe.
+
+This implementation uses POSIX `fork`, `flock`, and private worker process
+sessions on one machine. Start it from a dedicated, single-threaded main process;
+threaded callers are rejected. It is not a Windows or multi-machine scheduler.
+Do not replace/move the database or delete its lock file while workers run.
+Use a local filesystem and the same Docker context across restarts. The limit
+applies to this coordinated queue; independent synchronous commands are separate.
+
+Ctrl-C, SIGTERM, or an optional `stop_event` stops launching new work and signals
+active workers to interrupt. `run_task()` performs its normal cleanup and records
+interruption. After `shutdown_timeout` seconds (default 10), the coordinator kills
+an unresponsive worker's private process group, verifies exit, reconciles owned
+resources, and records an interrupted outcome. Tasks not yet claimed stay queued.
+
+Worker identities include PID and a random process nonce. On unexpected exit or
+restart, recovery refuses a live/reused PID and kills any remaining CLI subprocesses
+in that stopped worker's private session. It removes containers matching BOTH
+`agentic-harness.execution=<durable task execution ID>` and
+`agentic-harness.claim=<claim token>`, verifies their absence, and removes temporary
+workspaces with that execution's UUID prefix. It then calls the existing
+ownership-checked `finish_task()`; no extra recovery mutation or schema is needed.
+`Database.running_tasks()` supplies the internal ownership records without
+exposing tokens through public run status. Unmanaged claims are left untouched.
+
+If Docker or cleanup is unavailable, recovery fails closed and leaves the task
+running with an actionable coordinator error. Restart attempts cleanup again,
+never task execution. PID reuse conservatively requires manual investigation.
+A surviving orphan retains the coordinator lock until it exits. Daemon failure,
+in-flight Docker requests, machine failure, or OS processes that cannot be killed
+can still require manual cleanup using the durable labels. Do not manually
+requeue ambiguous work while its process/containers might still be active.
+
+For live tasks, the child obtains only the configured API credential from its
+own environment at execution time. The value is never placed in SQLite or argv.
+Existing environment-name forwarding and diagnostic redaction are retained;
+caught worker exceptions are also redacted, and unexpected process failures
+record a generic exit reason without printing a traceback containing credentials.
+Replay tasks require no keys, forward none, and run with container networking off.
+
+There is **no automatic task retry**. SQLite guarantees exclusive claim/finish
+transitions, not exactly-once external effects. A model call may succeed before
+the process or result write fails; that bill cannot be rolled back, and its
+answer may be lost. Recovery reports interruption rather than making another
+potentially paid attempt. Provider transport retries, billing, and live API calls
+have not been tested. No heartbeat, leases, or supervisor service are added.
+
+```bash
+uv run pytest tests/test_worker.py -q
+RUN_DOCKER_TESTS=1 uv run pytest tests/test_worker.py -q -k docker
 RUN_DOCKER_TESTS=1 uv run pytest tests -q
 ```
 

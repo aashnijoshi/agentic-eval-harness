@@ -218,6 +218,13 @@ class Database:
         )]
         return run
 
+    def running_tasks(self, worker_id: str | None = None) -> list[dict]:
+        """Ownership records for reconciliation; claim tokens stay out of public status."""
+        return [dict(row) for row in self.connection.execute(
+            """SELECT * FROM task_executions WHERE state = 'running'
+               AND (? IS NULL OR worker_id = ?)""", (worker_id, worker_id),
+        )]
+
     def get_results(self, run_id: str) -> RunResult:
         """Return finished results only; duration is cumulative task execution time."""
         run = self.get_run(run_id)
