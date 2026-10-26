@@ -71,10 +71,10 @@ class MiniSweAgent:
             responses = responses[task.task_id]
         container.copy_in(Path(__file__).with_name("mini_runner.py"), "/mini_runner.py")
         instructions = task.instructions
-        # Match complete paths, not a suffix of another filename or directory.
+        # Match complete paths while allowing sentence-final punctuation.
         missing_paths = [
             path for path in task.artifacts
-            if not re.search(rf"(?<![\w./-]){re.escape(path)}(?![\w./-])", instructions)
+            if not re.search(rf"(?<![\w./-]){re.escape(path)}(?![\w/-]|\.[\w./-])", instructions)
         ]
         if missing_paths:
             instructions += "\n\nRequired submission artifact paths, relative to /workspace: "

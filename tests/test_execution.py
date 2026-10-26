@@ -88,6 +88,8 @@ def test_submission_path_comes_from_metadata_without_exposing_tests(tmp_path):
 
 @pytest.mark.parametrize("instructions,needs_path", [
     ("Write to 'result.py'.", False),
+    ("Write to result.py.", False),
+    ("There is an unrelated 'result.py.bak'.", True),
     ("There is an unrelated 'other_result.py'.", True),
     ("There is an unrelated 'nested/result.py'.", True),
 ])
