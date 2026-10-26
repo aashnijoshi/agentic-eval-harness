@@ -7,6 +7,7 @@ import sqlite3
 import click
 
 from agentic_harness.db import Database
+from agentic_harness.execution import redact
 from agentic_harness.worker import run_workers
 
 database_option = click.option(
@@ -95,13 +96,14 @@ def read_report(path: Path, run_id: str) -> dict:
     # selected task has a measurement; available per-task values remain visible.
     usage = {name: sum(task[name] for task in tasks) if all(task[name] is not None for task in tasks) else None
              for name in ("model_calls", "cost")}
-    return {
+    # Protect display of legacy provider errors without rewriting saved records.
+    return redact({
         "run_id": run_id, "agent": run["agent"], "benchmark": run["benchmark"],
         "created_at": run["created_at"], "config": run["config"], "state": state,
         "progress": {"finished": finished, "total": len(tasks), "fraction": finished / len(tasks)},
         "counts": counts, "summary": results.summary, "tasks": tasks, "usage": usage,
         "duration_seconds": results.duration_seconds if results.results else None,
-    }
+    }, ())
 
 
 @cli.command()

@@ -157,7 +157,9 @@ def redact(value, secrets):
     if isinstance(value, str):
         for secret in secrets:
             value = value.replace(secret, "[REDACTED]")
-        return value
+        # Providers may echo a masked or previously rotated OpenAI-style key;
+        # exact replacement of the current credential cannot remove those.
+        return re.sub(r"\bsk-[A-Za-z0-9_.*…-]*[A-Za-z0-9_*…-]", "[REDACTED]", value)
     if isinstance(value, dict):
         return {key: redact(item, secrets) for key, item in value.items()}
     if isinstance(value, list):

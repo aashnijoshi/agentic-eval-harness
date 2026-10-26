@@ -225,24 +225,33 @@ def test_worker_crash_is_reconciled_without_paid_retry_and_stale_finish_is_rejec
     assert b"dummy-key-no-paid-calls" not in path.read_bytes()
 
 
-def test_worker_exception_is_redacted_and_other_work_continues(tmp_path, offline, monkeypatch):
+@pytest.mark.parametrize("key,message,expected", [
+    ("dummy-secret-from-worker-environment", "failure dummy-secret-from-worker-environment",
+     "RuntimeError: failure [REDACTED]"),
+    ("sk-proj-FAKEPREFIX1234567890TESTSUFFIX",
+     "AuthenticationError: Incorrect API key provided: sk-proj-FAKE****TESTSUFFIX. Check your API key.",
+     "RuntimeError: AuthenticationError: Incorrect API key provided: [REDACTED]. Check your API key."),
+])
+def test_worker_exception_is_redacted_and_other_work_continues(
+    tmp_path, offline, monkeypatch, key, message, expected,
+):
     path = tmp_path / "queue.sqlite3"
-    key = "dummy-secret-from-worker-environment"
     monkeypatch.setenv("OPENAI_API_KEY", key)
     run_id = submit(path, ["bash-001", "bash-002"], replay=None, model="openai/example")
 
     def execute(benchmark, agent, task_id, **ownership):
         if task_id == "bash-001":
-            raise RuntimeError("failure " + os.environ["OPENAI_API_KEY"])
+            raise RuntimeError(message)
         return TaskResult(task_id, "completed", "Submitted", True, 1.0)
 
     monkeypatch.setattr(worker, "run_task", execute)
     worker.run_workers(path, drain=True)
     with Database(path) as db:
         results = db.get_results(run_id).results
-    assert results[0].diagnostics["error"] == "RuntimeError: failure [REDACTED]"
+    assert results[0].diagnostics["error"] == expected
     assert results[1].passed is True
     assert key.encode() not in path.read_bytes()
+    assert b"FAKE" not in path.read_bytes() and b"TESTSUFFIX" not in path.read_bytes()
 
 
 def test_surviving_child_keeps_lock_after_coordinator_is_killed(tmp_path, offline, monkeypatch):

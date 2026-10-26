@@ -169,6 +169,48 @@ def test_missing_or_unknown_run_id_has_clear_error(tmp_path, command):
     assert result.exit_code == 1 and "Unknown run" in result.output
 
 
+@pytest.mark.parametrize("error,expected", [
+    ("AuthenticationError: Incorrect API key provided: sk-proj-FAKE****TESTSUFFIX. Check your API key.",
+     "AuthenticationError: Incorrect API key provided: [REDACTED]. Check your API key."),
+    ("RateLimitError: quota exceeded for sk-FAKE...TESTSUFFIX; retry later (429).",
+     "RateLimitError: quota exceeded for [REDACTED]; retry later (429)."),
+    ("NotFoundError: model gpt-5-mini is unavailable to key 'sk-proj-FAKEPREFIX1234567890TESTSUFFIX'.",
+     "NotFoundError: model gpt-5-mini is unavailable to key '[REDACTED]'."),
+])
+def test_historical_provider_errors_are_safe_to_display_without_rewriting_records(
+    tmp_path, monkeypatch, error, expected,
+):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    path = tmp_path / "queue.sqlite3"
+    run_id = submit(path, "--task_ids", "bash-001")
+    with Database(path) as db:
+        claim = db.claim_next("test-worker")
+        # Simulate a legacy record written before the provider redaction fix.
+        db.finish_task(claim["task_execution_id"], claim["claim_token"], TaskResult(
+            "bash-001", "error", "error", diagnostics={
+                "error": error, "agent": {"error": error, "messages": [{"content": error}]},
+            },
+        ), worker_id="test-worker")
+        original = tuple(db.connection.execute(
+            "SELECT error, result_json FROM task_executions",
+        ).fetchone())
+    for command, args in [("status", ()), ("results", ()),
+                          ("results", ("--format", "summary")), ("results", ("--format", "table"))]:
+        output = invoke(path, command, "--run_id", run_id, *args)
+        assert output.exit_code == 0, output.output
+        assert "FAKE" not in output.output and "TESTSUFFIX" not in output.output
+        if not args:
+            displayed = json.loads(output.output)["tasks"][0]
+            assert displayed["error"] == expected
+            if command == "results":
+                assert displayed["diagnostics"]["agent"]["error"] == displayed["error"]
+                assert displayed["diagnostics"]["agent"]["messages"][0]["content"] == displayed["error"]
+    with Database(path) as db:
+        assert tuple(db.connection.execute(
+            "SELECT error, result_json FROM task_executions",
+        ).fetchone()) == original
+
+
 @pytest.mark.skipif(os.environ.get("RUN_DOCKER_TESTS") != "1", reason="Offline subprocess/Docker workflow")
 def test_all_eight_tasks_through_public_cli_survive_worker_restart(tmp_path):
     path = tmp_path / "queue.sqlite3"

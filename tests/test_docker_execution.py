@@ -46,7 +46,9 @@ from unittest.mock import patch
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 from litellm.llms.openai.common_utils import OpenAIError
 provider = importlib.import_module("litellm.main").openai_chat_completions
-error = OpenAIError(status_code=401, message="Offline mocked rejection: offline-dummy-key")
+error = OpenAIError(status_code=401, message=(
+    "Offline mocked rejection: offline-dummy-key; masked key: sk-proj-FAKE****TESTSUFFIX. Check your API key."
+))
 with patch.object(provider, "completion", side_effect=error) as mocked:
     runpy.run_path("/mini_runner.py", run_name="__main__")
     assert mocked.call_count == 1
@@ -73,6 +75,9 @@ with patch.object(provider, "completion", side_effect=error) as mocked:
     assert outcome["model_calls"] == 0 and outcome["cost"] == 0.0
     assert "JSONDecodeError" not in result.diagnostics["error"]
     assert "offline-dummy-key" not in json.dumps(result.diagnostics)
+    assert "FAKE" not in json.dumps(result.diagnostics)
+    assert "TESTSUFFIX" not in json.dumps(result.diagnostics)
+    assert "masked key: [REDACTED]. Check your API key." in outcome["error"]
 
 
 @pytest.mark.parametrize("benchmark_type,task_id", CASES, ids=[task_id for _, task_id in CASES])
