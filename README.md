@@ -1,457 +1,214 @@
-# Agentic Harness Take-Home
+# Agentic Eval Harness
 
-A system for running AI agents against benchmark tasks.
+Run mini-swe-agent against the supplied bash and Python benchmarks through one
+CLI. Runs are queued in SQLite, local workers execute tasks in isolated Docker
+containers, and results remain available after the processes exit.
 
-## Quick Start
+Supports all five **bash-operations** tasks and all three **python-tasks**.
+mini-swe-agent is a Git submodule pinned to **v1.17.5**
+(`68d367bf0ccf40ad59a07101a94c21b66e7798ff`).
 
-### Installation
+## Architecture
 
-Use a Git checkout so `make init` can restore the submodule. If you have the
-original starter ZIP without `.git` and with an empty `agents/mini-swe-agent/`,
-run these commands once from the project root:
+```mermaid
+flowchart LR
+    CLI["harness run"] --> DB[("SQLite: runs + task_executions")]
+    DB --> W["harness worker<br/>bounded child processes"]
+    W --> T["Trusted container<br/>prepare initial files"]
+    T --> A["Agent container<br/>mini-swe-agent loop"]
+    A --> S["Stop agent<br/>validate and transfer permitted artifacts"]
+    S --> G["Same trusted container<br/>grade copied artifacts"]
+    G --> DB
+    DB --> R["harness status / results"]
+```
+
+The CLI handles submission and presentation. `db.py` owns atomic claims and
+persistence; `worker.py` bounds concurrent execution and handles recovery.
+`execution.py` runs one task through the small `Agent` and `Benchmark` protocols.
+No database lock is held during Docker or model execution.
+
+## Quick start
+
+Requires Git, uv, and a running Docker daemon. Workers require a POSIX system
+(macOS or Linux) and a dedicated, single-threaded process. uv installs Python
+3.11 below; the project supports Python 3.11+.
 
 ```bash
-git init -b main
-git clone --depth 1 --branch v1.17.5 https://github.com/SWE-agent/mini-swe-agent.git agents/mini-swe-agent
-git submodule add https://github.com/SWE-agent/mini-swe-agent.git agents/mini-swe-agent
-git submodule absorbgitdirs
+git clone --recurse-submodules https://github.com/aashnijoshi/agentic-eval-harness.git
+cd agentic-eval-harness
+git submodule update --init --recursive
+uv python install 3.11
+uv sync --locked
+uv run harness --help
+
+# Make the trusted bash grader's pinned base available locally.
+docker pull python@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377
+
+docker build -f docker/mini.Dockerfile -t harness-mini:python .
+docker build -f docker/mini.Dockerfile \
+  --build-arg BASE_IMAGE=alpine:latest@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a \
+  -t harness-mini:alpine .
 ```
 
-The recovered setup pins mini-swe-agent v1.17.5 at
-`68d367bf0ccf40ad59a07101a94c21b66e7798ff` through the Git submodule entry.
-The ZIP did not preserve the original revision; this compatible v1 release
-supports Python 3.11 and the flags used by the examples. Commit the submodule
-entry along with the project files when preparing the GitHub submission.
+The Dockerfile keeps the declared image families: Python slim for Python tasks
+and Alpine/musl for bash tasks, with Python and Bash installed into Alpine.
+Both runtimes use the lockfile and pinned uv image. Builds exclude host
+credentials, environments, benchmark data, and Git metadata.
+
+## Usage
+
+Every command accepts `--db PATH` (default `harness.sqlite3` in the current
+directory). Use the same path for submission, workers, status, and results.
+Use an absolute path when working from different directories.
+
+### Offline demonstration
+
+These scripted responses run the real mini agent loop and supplied graders,
+with no API key, paid calls, or container networking. The dedicated demo
+database keeps this example separate from any live runs.
 
 ```bash
-make init       # Initialize git submodules (mini-swe-agent)
-make install    # Install dependencies
-source .venv/bin/activate
+RUN_ID=$(uv run harness run --db demo.sqlite3 \
+  --agent agents/mini-swe-agent --benchmark bash-operations \
+  --task_ids bash-001,bash-002 --replay tests/fixtures/task_responses.json)
+
+uv run harness status --db demo.sqlite3 --run_id "$RUN_ID"
+uv run harness worker --db demo.sqlite3 --concurrency 2 --drain
+uv run harness results --db demo.sqlite3 --run_id "$RUN_ID" --format summary
+uv run harness results --db demo.sqlite3 --run_id "$RUN_ID" --format table
+uv run harness results --db demo.sqlite3 --run_id "$RUN_ID" --format json
 ```
 
-### Docker runtime prerequisite check
-
-These commands build and check the agent runtime only. They do not run a
-benchmark, grade a solution, or call a model API. Run them from the project root
-with Docker running and the submodule initialized:
+`run` validates and commits the submission, prints only the run ID, and exits
+without executing tasks. Use one ID, comma-separated IDs, or omit `--task_ids`
+to select every task. For example:
 
 ```bash
-docker build --progress=plain -f docker/mini.Dockerfile -t harness-mini:python .
-docker build --progress=plain -f docker/mini.Dockerfile --build-arg BASE_IMAGE=alpine:latest@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a -t harness-mini:alpine .
-
-docker run --rm --network none harness-mini:python mini --help
-docker run --rm --network none harness-mini:alpine mini --help
-docker run --rm --network none harness-mini:python python /opt/runtime/smoke_test.py
-docker run --rm --network none harness-mini:alpine python /opt/runtime/smoke_test.py
+uv run harness run --db demo.sqlite3 --agent agents/mini-swe-agent \
+  --benchmark bash-operations --replay tests/fixtures/task_responses.json
+uv run harness run --db demo.sqlite3 --agent agents/mini-swe-agent \
+  --benchmark python-tasks --replay tests/fixtures/task_responses.json
+uv run harness worker --db demo.sqlite3 --concurrency 2 --drain
 ```
 
-The default base is a digest-pinned `python:3.11-slim`. The Alpine build uses a
-digest-pinned snapshot of the benchmark's `alpine:latest`, adding Python and Bash
-through `apk`; it keeps Alpine and musl. Both builds use uv 0.12.5 pinned by digest
-and the existing `uv.lock`. The Dockerfile-specific ignore file excludes the
-host environment, credentials, Git metadata, harness source, and benchmark data
-from the build context.
+Omit `--drain` to keep a worker serving new submissions in a separate terminal.
+Ctrl+C or SIGTERM stops new work and interrupts active tasks. Unclaimed tasks
+remain queued. `--shutdown-timeout` controls the cleanup grace period (10 seconds
+by default). A second coordinator for the same database is rejected.
 
-The smoke test uses mini's own `DefaultAgent`, `LocalEnvironment`, and
-`DeterministicModel`: three scripted responses create a file with Bash, check it
-with Python, and submit. It also imports the real LiteLLM adapter without calling
-it. Networking is disabled, no credentials are injected, and `--rm` removes the
-containers after each check. The workspace is temporary container storage.
+`status` returns JSON counts, task states, timestamps, and finished/total
+progress; `--run_id` is required. A run is running if any task is active,
+otherwise queued if work remains. After all tasks finish, error takes
+precedence over timed_out, then interrupted, then completed. An incorrect
+solution is completed with `passed=false`, separately counted as a failed grade.
 
-Verified on Linux ARM64: Python 3.11.17 in the slim runtime and Python 3.14.8 on
-Alpine 3.24.3. Both reported `Submitted`, three model calls, and zero cost. These
-are scripted model calls, not requests to an API. The Alpine native dependencies
-also imported successfully without installing a compiler toolchain.
+All result formats show outcomes, scores, accuracy, graded accuracy, errors,
+durations, and available model calls/cost. JSON also includes diagnostics.
+Overall accuracy is passed / selected tasks; graded accuracy is passed / valid
+grades, or null if no grades exist. Pending tasks have null outcomes, not failed
+grades. Usage totals stay null if any selected task lacks a measurement;
+available per-task values remain visible. Duration is cumulative recorded task
+time, not wall time or queue waiting time.
 
-The base images and Python dependencies are pinned, but Alpine's `apk`
-repositories can publish newer system packages. Preserve a built image by its
-image ID/digest when an exact runtime snapshot is required. Other CPU
-architectures and live model-provider calls have not been tested.
+Successful submission, inspection, and worker shutdown return exit code 0.
+Invalid input, missing runs, and coordinator failures return nonzero. Inspect
+results to determine benchmark success; a worker does not exit unsuccessfully
+merely because a task received a failed grade.
 
-### Execute benchmarks synchronously in Docker
+### Live models
 
-All five `bash-operations` tasks and all three `python-tasks` are supported.
-The runtime is selected from each task's declared `docker_image`: Alpine tasks
-use `harness-mini:alpine`, and Python tasks use `harness-mini:python`.
-These commands use mini's built-in deterministic model and need no API key:
+Live execution is implemented but has not been tested against a provider.
+Set the named credential securely in the **worker's environment**; do not put
+its value in arguments or repository files. Submission does not require the key.
 
 ```bash
-uv run harness run --agent agents/mini-swe-agent --benchmark bash-operations --task_ids bash-001 --replay tests/fixtures/bash_001_responses.json
-
-# Multiple selected tasks, in the requested order.
-uv run harness run --agent agents/mini-swe-agent --benchmark bash-operations --task_ids bash-002,bash-003 --replay tests/fixtures/task_responses.json
-
-# Omit task IDs to execute the entire benchmark sequentially.
-uv run harness run --agent agents/mini-swe-agent --benchmark bash-operations --replay tests/fixtures/task_responses.json
-uv run harness run --agent agents/mini-swe-agent --benchmark python-tasks --replay tests/fixtures/task_responses.json
+# Replace PROVIDER/MODEL with an available model; this queues a potentially paid run.
+uv run harness run --db live.sqlite3 --agent agents/mini-swe-agent \
+  --benchmark bash-operations --task_ids bash-001 \
+  --model PROVIDER/MODEL --api-key-env OPENAI_API_KEY
+uv run harness worker --db live.sqlite3 --concurrency 2 --drain
 ```
 
-Every response has the same shape, including single-task runs: `results` is a
-list of per-task records, `summary` aggregates those records, and
-`duration_seconds` measures the whole run. This replaces the earlier flat
-single-task JSON response. Each task retains `task_id`, `execution_status`,
-`agent_status`, `passed`, `score`, `duration_seconds`, and diagnostics. Diagnostics
-include the dataset-loaded instructions, mini's messages/model-call count,
-artifact previews/hashes, grader details, image IDs, and failure phase/error.
+Use the credential variable appropriate to the provider, such as
+`ANTHROPIC_API_KEY`. Only its name is stored in SQLite; the worker forwards the
+value by environment name and redacts known credential values from diagnostics.
+`--timeout` (60 seconds), `--step-limit` (20), and `--cost-limit` ($1) configure
+each task. Cost checks occur between model calls, so one call can exceed the cap.
 
-`summary.accuracy` is passed / selected tasks, so infrastructure errors do not
-silently disappear from the denominator. `graded_accuracy` is passed / tasks
-with a valid grade, or null when none were graded. The summary also counts
-completed, graded, passed, failed, errored, timed-out, and interrupted tasks.
-Scores remain the benchmarks' original binary scores. Unknown, empty, or
-duplicate task selections are rejected before any task starts. A failed grade,
-agent error, or timeout does not stop later selected tasks. Ctrl-C interrupts
-the current task and marks remaining tasks interrupted without starting them.
+## Design decisions and failure handling
 
-Replay files may contain a response list (reused independently for each task)
-or a mapping from task IDs to response lists. The all-task fixture uses the
-mapping form. These are scripted responses to the real mini agent; they do not
-bypass its loop or the grader. No solutions or task IDs are embedded in harness
-production code. Each fixture task is expected to submit and score 1.0.
+- **Isolation:** each task gets fresh agent and trusted containers, separate
+  filesystems, resource limits, no host workspace mounts, and dropped
+  capabilities. Replay networking is disabled.
+- **Trusted grading:** benchmark definitions, graders, and Python tests stay
+  outside the agent container. After the agent stops, only declared artifacts
+  enter grading. Paths, links, file types, and artifact sizes are checked.
+  The supplied scoring rules and grader exit-code conventions are preserved.
+- **Durability:** two SQLite tables hold runs and task executions. Submission
+  inserts all task rows atomically. `BEGIN IMMEDIATE` serializes claims;
+  completion checks the running state, task ID, worker ID, and unique claim token.
+- **Concurrency:** bounded, one-task child processes each open their own
+  connection. An OS lock in `<database>.worker.lock` is inherited by children,
+  preventing a replacement coordinator from bypassing the limit after a crash.
+  Never delete the lock file or move/replace a database while workers run.
+- **Recovery:** stopped workers are identified by PID and process nonce.
+  Cleanup matches both durable execution ID and claim-token Docker labels.
+  After verified exit and cleanup, the active claim is completed as interrupted.
+  A live/reused PID or unavailable cleanup blocks recovery; age never requeues work.
 
-Execution proceeds in two separate containers:
+There are no automatic task retries. SQLite cannot guarantee exactly-once
+external effects: a paid model call may succeed before its answer is persisted.
+Recovery records interruption rather than making another potentially paid call.
+Daemon failures and in-flight Docker requests can require manual reconciliation
+using the `agentic-harness.execution` and `agentic-harness.claim` labels.
 
-1. A fresh trusted Python container receives the benchmark's scripts and dataset.
-   Bash uses the digest-pinned Python base. Python grading reuses a separate
-   instance of the already-built Python runtime, which supplies locked pytest.
-   No package installation or networking is needed during execution.
-   Runtime inspection uses the canonical `python@sha256:…` reference reported
-   in Docker's `RepoDigests`. On Docker Desktop 29.9.2, the equivalent
-   `python:3.11-slim@sha256:…` lookup intermittently returned "No such image"
-   while the pinned image was present. The digest is unchanged; there is no
-   automatic pull, delay, or retry. The daemon's intermittent alias behavior
-   remains unexplained.
-   Python's preparation script adds a backward-compatible `--skip-install`
-   option; default standalone installation behavior is unchanged.
-2. Only those initial workspace files and the public task prompt go into an
-   isolated mini container using the declared image family. Bash setup files are
-   preserved. Python preparation creates tests and a solution stub in the trusted
-   container, but copies only the stub to the agent workspace. The grader,
-   dataset, and Python tests are never copied into the agent container. Replay
-   runs have networking disabled. Each task gets new containers and directories.
-   Copy-in archives normalize ownership to container UID/GID 0 so initial files
-   remain editable with all container capabilities dropped.
-3. After mini finishes, its container is stopped before the declared artifact is
-   copied out. Tar paths and file types are checked; links and special files are
-   rejected. Nested artifact paths are preserved. Artifacts are limited to 1 MiB
-   and 100 entries across the submission. Python accepts only its declared
-   solution file, excluding agent-created tests and pytest configuration files.
-4. The original evaluator runs against the copied submission in the trusted
-   container's clean submission directory. Python tests are copied there from
-   trusted preparation immediately before grading. Both benchmarks' JSON and
-   exit-code conventions are preserved: Python's grader exits zero even for
-   failed solutions. A wrong solution is a completed execution with a failed
-   grade, not an infrastructure error. The supplied grader code is unchanged.
-5. Context managers remove both containers and host temporary directories on
-   success, exceptions, timeouts, and keyboard interruption. No volumes or host
-   repository mounts are used. Cleanup errors are reported explicitly.
+## Adding an agent or benchmark
 
-Exit codes are 0 when all selected tasks pass, 1 when at least one grade fails,
-and 2 when any task has an execution error, timeout, or interruption.
-Configuration errors also return a nonzero exit code. If a task obtained no
-valid grade, its `passed` and `score` are null.
+`models.py` defines the contracts; the supplied adapters show their use:
+
+- An **Agent** supplies `image_for(task)`, `run(container, task) -> AgentResult`,
+  `network`, and credential values for diagnostic redaction (`secrets`).
+- A **Benchmark** supplies `task_ids()`, `load_task(task_id)`,
+  `prepare(container, task)`, `evaluate(container, task) -> Grade`, and
+  `grader_image`. Normalize dataset fields and
+  preparation/grading arguments inside the adapter. Declare permitted artifacts
+  in `Task` and preserve the grader's actual scoring contract.
+
+Register new identifiers in submission validation and worker reconstruction,
+and update CLI choices where applicable. Add a runtime image/mapping if needed.
+Selection is explicit; there is no automatic plugin discovery. The current
+benchmarks have binary grades; partial-credit benchmarks need corresponding
+grade-validation changes.
+
+Benchmark-specific instructions remain in
+[bash-operations](benchmarks/bash-operations/README.md) and
+[python-tasks](benchmarks/python-tasks/README.md).
+
+## Testing and limitations
 
 ```bash
-# Unit/contract tests; Docker is not required.
-uv run pytest tests/test_execution.py -q
-
-# Real Docker execution, still entirely offline and free of model API calls.
-RUN_DOCKER_TESTS=1 uv run pytest tests/test_docker_execution.py -q
-
-# Both suites; integration tests are skipped unless explicitly enabled.
-uv run pytest tests -q
+uv run pytest tests -q                         # No Docker or paid APIs required.
+RUN_DOCKER_TESTS=1 uv run pytest tests -q        # Includes Docker and full async CLI.
 ```
 
-A live model path is also available, but has not been tested or called during
-development. It requires `--model PROVIDER/MODEL` instead of `--replay` and a
-provider key already in the environment. Use `--api-key-env ANTHROPIC_API_KEY`
-for an Anthropic key, for example; the default is `OPENAI_API_KEY`. Only the named
-key is forwarded, by variable name rather than its value in command arguments.
-Known key values are redacted from returned diagnostics. Live runs enable the
-agent container's outbound network access. The default limits are 60 seconds,
-20 model calls, and an estimated $1 model cost; they can be changed with
-`--timeout`, `--step-limit`, and `--cost-limit`. Cost checks happen between calls,
-so one call can exceed the configured cost threshold.
+Tests cover all eight correct and incorrect deterministic submissions, durable
+queue behavior, actual process concurrency, interruption, stale ownership,
+cleanup, and the public asynchronous workflow.
 
-The CLI remains synchronous; its asynchronous submission and
-`status`/`results` commands are not implemented. Images must already be available locally; execution
-does not build or pull them. Full logs/artifacts are not retained on disk; the
-result contains messages, artifact previews, and grader diagnostics. Docker
-daemon failure or an uncatchable process kill can prevent immediate cleanup;
-containers carry an `agentic-harness.execution` label for identification.
+Verified on macOS ARM64 with Linux ARM64 Docker containers and Python 3.11.
+Windows, other architectures, and live model providers are unverified.
+Use a local filesystem, one machine, a dedicated single-threaded worker process,
+and the same Docker context across restarts. Hard-linked database paths are
+rejected. The concurrency limit covers this queue, not independent executions.
 
-Known benchmark limitations are preserved: `bash-003` has five logical lines but
-no trailing newline (`wc -l` alone returns four), and bash substring/existence
-checks remain as supplied. Python grading executes submitted Python code in an
-isolated container; withholding test files prevents editing them during agent
-execution, but the provided pytest grader is not a hardened checker against
-malicious code that manipulates pytest from inside its own Python process.
+The submodule, base images, uv runtime image, and Python dependencies are pinned.
+Alpine package repositories can change system packages; preserve built image
+digests for exact runtime reproduction. Workers reference the local checkout
+and replay files, so retain those files unchanged for queued runs. There is no
+database migration or retention system.
 
-### SQLite persistence and durable queue (Python API)
-
-`agentic_harness.db.Database` adds persistence independently of the CLI and
-Docker execution. It uses standard-library SQLite with two tables:
-
-| Table | Fields and purpose |
-| --- | --- |
-| `runs` | UUID `run_id`; canonical `agent` and `benchmark` identifiers; `task_ids_json` preserving the selected task list; `config_json` containing explicit execution settings; UTC `created_at` for submission order. |
-| `task_executions` | UUID `task_execution_id`; foreign-key `run_id`; `task_id` and selection `position`; execution `state`; `worker_id` and unique per-claim `claim_token`; UTC `claimed_at`, `started_at`, and `finished_at`; serialized `TaskResult` in `result_json`; optional diagnostic `error`. |
-
-The schema enforces valid states and unique `(run_id, task_id)` and
-`(run_id, position)` pairs. A state index supports queued-task selection; the
-unique indexes also support retrieving a run's tasks. Every connection enables
-foreign keys. Initialization is idempotent. Use one `Database` instance per
-caller/thread, with a context manager or explicit `close()`.
-
-Submission validates the benchmark's real task definitions, the supported agent
-and image families, a provider/model identifier or valid replay file, and the
-execution limits. It inserts the run and every queued task in one transaction;
-any insert failure rolls back the whole submission. Model submission does not
-require credentials to be present yet. Configuration stores only `model`,
-`replay` (an absolute file path), `api_key_env` (a variable name), `timeout`,
-`step_limit`, and `cost_limit`. It never reads or stores environment values or
-serializes agent objects. Arbitrary configuration fields are rejected.
-
-For example, from the project root, this uses a temporary database and does not
-run Docker or call a model. The successful `TaskResult` is illustrative; a
-worker will eventually obtain it from the existing `run_task()` function.
-
-```python
-from pathlib import Path
-from tempfile import TemporaryDirectory
-
-from agentic_harness.db import Database
-from agentic_harness.models import TaskResult
-
-with TemporaryDirectory() as directory, Database(Path(directory) / "queue.sqlite3") as db:
-    run_id = db.submit_run(
-        agent="agents/mini-swe-agent",
-        benchmark="bash-operations",
-        task_ids=["bash-001", "bash-002"],
-        replay=Path("tests/fixtures/task_responses.json"),
-    )
-    claim = db.claim_next("worker-example")
-    result = TaskResult("bash-001", "completed", "Submitted", True, 1.0)
-    db.finish_task(
-        claim["task_execution_id"], claim["claim_token"], result,
-        worker_id=claim["worker_id"],
-    )
-    print([(task["task_id"], task["state"]) for task in db.get_run(run_id)["tasks"]])
-    # [('bash-001', 'completed'), ('bash-002', 'queued')]
-    print(db.get_results(run_id).summary)
-    # total=2, completed=1, graded=1, passed=1, failed=0,
-    # errors=0, timed_out=0, interrupted=0, accuracy=0.5, graded_accuracy=1.0
-```
-
-`claim_next(worker_id)` uses `BEGIN IMMEDIATE` before selecting the oldest
-queued run and its first selected task. SQLite serializes writers, so a second
-claimer waits for the first transaction to commit, then sees the task as
-running. An empty queue returns `None`. A fresh token is generated per claim,
-and claim/start times are initially equal. The transaction commits before the
-claim is returned: Docker execution must happen outside a database transaction.
-Lock contention waits up to five seconds, then raises a SQLite error to the
-caller without silently retrying work.
-
-`finish_task()` conditionally updates only a running row matching the execution
-ID, task ID, worker ID, and claim token. Invalid results, mismatched ownership,
-stale tokens, and duplicate completion are rejected. Final states are
-`completed`, `error`, `timed_out`, and `interrupted`. An incorrect solution is
-`completed` with `passed=False` and score `0.0`. A grade obtained before a later
-cleanup error is retained, matching synchronous execution. Results from the
-execution layer already redact its known API key values; callers must not add
-secrets to arbitrary result diagnostics.
-
-`get_run()` returns configuration and ordered task states/timestamps without
-exposing claim tokens. `get_results()` returns a `RunResult` with finished
-results in selection order and the same summary calculation as synchronous
-execution. Queued/running tasks have no fabricated result and do not count as
-failed solutions; they remain in the overall accuracy denominator. Graded
-accuracy includes only available grades and is null when none exist. Database
-`duration_seconds` is the sum of persisted task durations, not queue waiting
-time or a run's wall-clock duration.
-
-Crash/recovery policy: committed claims survive process exit as
-`running`, with their owner, token, and timestamps intact. Claim age alone never
-requeues work, and there is no retry, lease expiry, heartbeat, or recovery daemon.
-The worker coordinator below associates Docker labels with durable execution IDs
-and claim tokens. It recovers orphaned work only after confirming worker exit
-and reconciling its containers, then atomically completes the active claim as
-interrupted. The final state prevents late completion from overwriting recovery.
-There is no requeue operation.
-
-The queue assumes one local SQLite file and the same checkout/replay files are
-available to the future worker. It records configuration references, not copies
-of datasets, source, or replay contents; preserve those files for reproducibility.
-The existing ignore rules exclude SQLite files and their journal sidecars.
-There are no migrations or database/CLI integration yet.
-
-```bash
-uv run pytest tests/test_db.py -q
-RUN_DOCKER_TESTS=1 uv run pytest tests -q
-```
-
-### Local background workers (Python API)
-
-Run the coordinator in a dedicated terminal/process after submitting through
-`Database.submit_run()`. Public async CLI commands are deferred to Chunk 2C.
-
-```python
-from agentic_harness.worker import run_workers
-
-run_workers("runs.sqlite3", concurrency=2)  # Serve until Ctrl-C or SIGTERM.
-# Or: run_workers("runs.sqlite3", concurrency=2, drain=True)
-# Drain executes currently queued work and exits when no queued/active work remains.
-```
-
-The coordinator creates at most `concurrency` child processes. Each child opens
-its own SQLite connection, atomically claims one task, reconstructs the benchmark
-and mini adapter from persisted configuration, calls the existing `run_task()`,
-and finishes its claim with the returned `TaskResult`. It then exits. Connections
-are closed before the coordinator forks; no database transaction spans execution.
-A wrong solution, setup error, timeout, or caught worker exception does not stop
-other queued tasks. A worker failing before it can claim anything stops the
-coordinator rather than causing an endless respawn loop.
-
-An exclusive `flock` on `<database>.worker.lock` permits one coordinator for that
-canonical database path. Symlinks resolve to the same lock; hard-linked databases
-are rejected. Every child inherits the same lock descriptor until it exits, so
-killing the coordinator cannot release the concurrency guard while its children
-are still executing. Orphaned children can finish only their current task, never
-claim another. The sidecar is deliberately not unlinked: unlinking a held lock
-would allow another coordinator to lock a different inode. It is Git-ignored.
-The lock is separate from SQLite because locking the database itself blocked
-SQLite writes in the macOS verification probe.
-
-This implementation uses POSIX `fork`, `flock`, and private worker process
-sessions on one machine. Start it from a dedicated, single-threaded main process;
-threaded callers are rejected. It is not a Windows or multi-machine scheduler.
-Do not replace/move the database or delete its lock file while workers run.
-Use a local filesystem and the same Docker context across restarts. The limit
-applies to this coordinated queue; independent synchronous commands are separate.
-
-Ctrl-C, SIGTERM, or an optional `stop_event` stops launching new work and signals
-active workers to interrupt. `run_task()` performs its normal cleanup and records
-interruption. After `shutdown_timeout` seconds (default 10), the coordinator kills
-an unresponsive worker's private process group, verifies exit, reconciles owned
-resources, and records an interrupted outcome. Tasks not yet claimed stay queued.
-
-Worker identities include PID and a random process nonce. On unexpected exit or
-restart, recovery refuses a live/reused PID and kills any remaining CLI subprocesses
-in that stopped worker's private session. It removes containers matching BOTH
-`agentic-harness.execution=<durable task execution ID>` and
-`agentic-harness.claim=<claim token>`, verifies their absence, and removes temporary
-workspaces with that execution's UUID prefix. It then calls the existing
-ownership-checked `finish_task()`; no extra recovery mutation or schema is needed.
-`Database.running_tasks()` supplies the internal ownership records without
-exposing tokens through public run status. Unmanaged claims are left untouched.
-
-If Docker or cleanup is unavailable, recovery fails closed and leaves the task
-running with an actionable coordinator error. Restart attempts cleanup again,
-never task execution. PID reuse conservatively requires manual investigation.
-A surviving orphan retains the coordinator lock until it exits. Daemon failure,
-in-flight Docker requests, machine failure, or OS processes that cannot be killed
-can still require manual cleanup using the durable labels. Do not manually
-requeue ambiguous work while its process/containers might still be active.
-
-For live tasks, the child obtains only the configured API credential from its
-own environment at execution time. The value is never placed in SQLite or argv.
-Existing environment-name forwarding and diagnostic redaction are retained;
-caught worker exceptions are also redacted, and unexpected process failures
-record a generic exit reason without printing a traceback containing credentials.
-Replay tasks require no keys, forward none, and run with container networking off.
-
-There is **no automatic task retry**. SQLite guarantees exclusive claim/finish
-transitions, not exactly-once external effects. A model call may succeed before
-the process or result write fails; that bill cannot be rolled back, and its
-answer may be lost. Recovery reports interruption rather than making another
-potentially paid attempt. Provider transport retries, billing, and live API calls
-have not been tested. No heartbeat, leases, or supervisor service are added.
-
-```bash
-uv run pytest tests/test_worker.py -q
-RUN_DOCKER_TESTS=1 uv run pytest tests/test_worker.py -q -k docker
-RUN_DOCKER_TESTS=1 uv run pytest tests -q
-```
-
-### Configuring mini-swe-agent
-
-Run the setup wizard to configure your default model and API key:
-
-```bash
-mini-extra config setup
-```
-
-Read more about how to configure mini-swe-agent: https://mini-swe-agent.com/latest/usage/config/
-
-### Run Examples
-
-```bash
-make bash-example
-make py-example
-```
-
-These commands demonstrate the full workflow: setup → run agent → evaluate.
-
-## Project Structure
-
-```
-.
-├── benchmarks/
-│   ├── bash-operations/      # Bash command benchmark
-│   │   ├── dataset.json      # 5 bash tasks
-│   │   ├── setup.py          # Setup workspace
-│   │   ├── evaluate.py       # Evaluate results
-│   │   └── README.md
-│   └── python-tasks/         # Python coding benchmark
-│       ├── dataset.json      # 3 Python tasks
-│       ├── prepare.py        # Setup workspace (different name!)
-│       ├── grade.py          # Evaluate results (different name!)
-│       └── README.md
-├── agents/
-│   └── mini-swe-agent/       # Example agent (git submodule)
-├── examples/                 # Example scripts
-├── src/
-│   └── agentic_harness/      # Your harness implementation
-└── Makefile
-```
-
-## Workflow
-
-Each benchmark follows a three-step process:
-
-1. **Setup**: Prepare workspace with initial files
-2. **Execute**: Run agent to solve the task
-3. **Evaluate**: Check if task was completed correctly
-
-## Benchmarks
-
-### bash-operations
-- 5 simple bash tasks
-- Uses `alpine:latest` Docker image
-- CLI: `--workspace-dir <path> --task <id>`
-- Exit codes: 0 for pass, 1 for fail
-
-[Full documentation](benchmarks/bash-operations/README.md)
-
-### python-tasks
-- 3 simple Python tasks
-- Uses `python:3.11-slim` Docker image
-- CLI: `<task_id> --workspace <path>` (positional argument!)
-- Exit code: Always 0 (check JSON for pass/fail)
-
-[Full documentation](benchmarks/python-tasks/README.md)
-
-## mini-swe-agent
-
-Important flags:
-- `--exit-immediately`: Required to prevent hanging
-- `-y/--yolo`: Skip action confirmations
-- `-t/--task`: Task description
-
-For more information, run `mini --help` or read the [mini-swe-agent quickstart](https://mini-swe-agent.com/latest/quickstart/).
-
-## Notes
-
-- Benchmarks have intentionally different interfaces to test flexibility
-- Tasks specify `docker_image` field for container execution
-- Each benchmark has its own evaluation logic
+The Python grader executes submitted code and is not hardened against hostile
+code manipulating pytest inside the grading process. Hiding tests during agent
+execution does not make that grader adversarially secure. Free-form artifacts
+and diagnostics may contain sensitive task data; keep the ignored SQLite files
+and results private.
