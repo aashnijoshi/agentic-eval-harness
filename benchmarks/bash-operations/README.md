@@ -1,30 +1,32 @@
-# Bash Operations Benchmark
+# Bash Operations
 
-A simple benchmark for testing basic bash command execution capabilities of AI agents.
+Five small tasks that test whether an agent can actually use a shell to get things done.
 
-## Overview
+Instead of asking the agent to explain a command, we let it run commands in a workspace and check what it leaves behind.
 
-This benchmark contains 5 tasks that test an agent's ability to execute basic bash operations like:
-- Creating files with specific content
-- Creating directories and files
-- Counting lines in files
-- Listing files with specific extensions
-- Generating sequences
+## 1. What's being tested?
 
-## Dataset Structure
+The five tasks cover:
 
-Each task in `dataset.json` contains:
-- `task_id`: Unique identifier (e.g., "bash-001")
-- `problem_statement`: Natural language description of what the agent should do
-- `docker_image`: Docker image to use for the task environment ("alpine:latest")
-- `verification`: Criteria for evaluating the solution
-- `difficulty`: Task difficulty level
-- `setup` (optional): Files to create in the workspace before running the agent
+- Creating a file with specific content (`bash-001`)
+- Making a directory and three files (`bash-002`)
+- Counting lines (`bash-003`)
+- Listing `.txt` files (`bash-004`)
+- Generating a sequence (`bash-005`)
 
-## Verification Types
+Everything is defined in `dataset.json`, including task instructions, any starting files, and verification criteria. Tasks use an Alpine Linux environment.
 
-### `file_content`
-Checks exact match of file content (after stripping whitespace).
+## 2. How grading works
+
+The benchmark checks the files the agent produces.
+
+| Check | What it looks for |
+|---|---|
+| `file_content` | Exact text match, ignoring surrounding whitespace |
+| `file_exists` | All required paths exist; contents aren't checked |
+| `file_content_contains` | Every expected string occurs somewhere in the file; order and extra content don't matter |
+
+For example, `bash-001` asks for `hello.txt` containing `Hello World`:
 
 ```json
 {
@@ -34,86 +36,40 @@ Checks exact match of file content (after stripping whitespace).
 }
 ```
 
-### `file_exists`
-Checks if all specified files exist.
+A task receives **1.0 if it passes, and 0.0 if it fails**. The harness reports the fraction of tasks passed.
 
-```json
-{
-  "type": "file_exists",
-  "files": [
-    "test_dir/file1.txt",
-    "test_dir/file2.txt",
-    "test_dir/file3.txt"
-  ]
-}
-```
+## 3. Running a task directly
 
-### `file_content_contains`
-Checks if file contains all expected lines (substring match).
-
-```json
-{
-  "type": "file_content_contains",
-  "file": "txt_files.txt",
-  "expected_lines": [
-    "file1.txt",
-    "file2.txt",
-    "document.txt"
-  ]
-}
-```
-
-## Usage
-
-### Setup Task
-
-Prepare the workspace for a specific task:
+From `benchmarks/bash-operations`, prepare a fresh workspace:
 
 ```bash
-python setup.py --workspace-dir /path/to/workspace --task bash-001
+python setup.py --workspace-dir /tmp/bash-task --task bash-001
 ```
 
-### Evaluate Task
-
-Evaluate the workspace after the agent has completed the task:
+The agent can now execute shell commands in that workspace. After it finishes, run:
 
 ```bash
-python evaluate.py --workspace-dir /path/to/workspace --task bash-001
+python evaluate.py --workspace-dir /tmp/bash-task --task bash-001
 ```
 
-Returns JSON result:
-```json
-{
-  "task_id": "bash-001",
-  "passed": true,
-  "score": 1.0,
-  "details": {
-    "expected": "Hello World",
-    "actual": "Hello World"
-  }
-}
-```
+The evaluator returns JSON with the task ID, pass/fail result, score, and check details. Unlike the Python benchmark, it also uses its process exit code: `0` for a pass, `1` for a failure. The harness accounts for this difference.
 
-Exit codes:
-- `0`: Task passed
-- `1`: Task failed
+## 4. Running it through the harness
 
-## Docker Environment
-
-All tasks are designed to run in Docker containers using the `alpine:latest` image specified in each task's `docker_image` field.
-
-## Scoring
-
-Each task is scored as pass/fail (1.0 or 0.0). The overall benchmark score is the percentage of tasks passed.
-
-## Example Workflow
+From the repository root, after completing the [main README's setup](../../README.md):
 
 ```bash
-# 1. Setup workspace
-python setup.py --workspace-dir /tmp/workspace --task bash-003
+RUN_ID=$(uv run harness run \
+  --db demo.sqlite3 \
+  --agent agents/mini-swe-agent \
+  --benchmark bash-operations \
+  --replay tests/fixtures/task_responses.json)
 
-# 2. Agent runs and solves the task (creates count.txt)
+uv run harness worker --db demo.sqlite3 --concurrency 2 --drain
 
-# 3. Evaluate results
-python evaluate.py --workspace-dir /tmp/workspace --task bash-003
+uv run harness results --db demo.sqlite3 --run_id "$RUN_ID" --format table
 ```
+
+This submits all five tasks with saved model responses and no paid API calls. The worker processes all queued tasks in that database. Each task gets its own agent container, while grading happens separately.
+
+See the [main README](../../README.md) for live-model runs and the architecture. The point is pretty simple: did the agent leave the right files behind? The verifier checks the result rather than trusting the agent's explanation.

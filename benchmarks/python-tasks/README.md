@@ -1,59 +1,48 @@
-# Python Tasks Benchmark
+# Python Tasks
 
-A simple benchmark for testing Python coding capabilities of AI agents using pytest.
+Three small Python problems to see whether an agent can write working code. Nothing too fancy here: the agent writes a function, and `pytest` checks whether it does what we asked.
 
-## Overview
+## 1. What's being tested?
 
-This benchmark contains 3 simple Python programming tasks:
-- Write an addition function (2+2)
-- Implement Fibonacci sequence
-- Get nth element from a list
+| Task | What the agent needs to do |
+|---|---|
+| `py-001` | Write `add()` with no arguments that returns 4 |
+| `py-002` | Write `fibonacci(n)` for the 0-indexed Fibonacci sequence |
+| `py-003` | Write `get_nth(lst, n)` using 0-based indexing; return `None` for negative or out-of-range indices |
 
-Tasks are verified by running pytest tests against the agent's solution.
+All three tasks are in `dataset.json`. Each specifies the prompt, Docker image, solution filename, and test code. All three expect the solution in **`solution.py`**.
 
-## Dataset Structure
+## 2. How it works
 
-Each task in `dataset.json` contains:
-- `id`: Unique identifier (e.g., "py-001")
-- `prompt`: Natural language description of the function to implement
-- `docker_image`: Docker image to use ("python:3.11-slim")
-- `solution_file`: Name of file where agent should write solution (default: "solution.py")
-- `test_code`: Pytest test code that will be used to verify the solution
+Each task follows the same basic flow:
 
+1. **Set up:** create `solution.py` and `test_solution.py`
+2. **Solve:** the agent writes its implementation in the solution file
+3. **Test:** run `pytest` against that solution
+4. **Score:** return 1.0 if all tests pass, otherwise 0.0
 
-## Dependencies
+The tasks use Python 3.11 in Docker. `pytest` is the only benchmark dependency, listed in `requirements.txt`.
 
-This benchmark requires pytest for test execution. The `requirements.txt` file contains:
-```
-pytest>=7.0.0
-```
+When running through the main harness, the agent and grader use separate containers. The agent doesn't get to read the grader's tests.
 
-Dependencies are automatically installed during setup.
+## 3. Running a task directly
 
-## Usage
-
-### Setup Task
-
-Prepare the workspace with test files and install dependencies:
+From `benchmarks/python-tasks`, set up a fresh workspace:
 
 ```bash
-python prepare.py py-001 --workspace /path/to/workspace
+python prepare.py py-001 --workspace /tmp/python-task
 ```
 
-This:
-1. Installs pytest from requirements.txt
-2. Creates `test_solution.py` - pytest tests for the task
-3. Creates `solution.py` - empty stub file where the agent writes code
+This installs the benchmark requirements and creates the solution stub and test file. The agent (or you, if you're testing manually) can then edit `solution.py`.
 
-### Evaluate Task
-
-Run pytest to verify the solution:
+Once the solution is ready:
 
 ```bash
-python grade.py py-001 --workspace /path/to/workspace
+python grade.py py-001 --workspace /tmp/python-task
 ```
 
-Returns JSON result:
+The grader returns JSON like this:
+
 ```json
 {
   "task_id": "py-001",
@@ -67,36 +56,26 @@ Returns JSON result:
 }
 ```
 
-Exit code:
-- Always exits with `0` (check the JSON output to determine pass/fail)
+This grader exits with code `0` even when a solution fails. Check `passed` and `score` in the JSON rather than treating the process exit code as the grade. Tests have a 30-second execution timeout.
 
-## Docker Environment
+## 4. Running it through the harness
 
-All tasks are designed to run in Docker containers using the `python:3.11-slim` image specified in each task's `docker_image` field.
-
-## Evaluation
-
-- Uses `pytest` to run tests (installed via requirements.txt during setup)
-- 30-second timeout for test execution
-- Score is 1.0 if all tests pass, 0.0 otherwise
-- Test output is included in result details
-
-## Example Workflow
+From the repository root, after completing the [main README's setup](../../README.md):
 
 ```bash
-# 1. Setup workspace
-python prepare.py py-002 --workspace /tmp/workspace
+RUN_ID=$(uv run harness run \
+  --db demo.sqlite3 \
+  --agent agents/mini-swe-agent \
+  --benchmark python-tasks \
+  --replay tests/fixtures/task_responses.json)
 
-# 2. Agent writes solution in solution.py:
-#    def fibonacci(n):
-#        if n <= 1:
-#            return n
-#        return fibonacci(n-1) + fibonacci(n-2)
+uv run harness worker --db demo.sqlite3 --concurrency 2 --drain
 
-# 3. Evaluate with pytest
-python grade.py py-002 --workspace /tmp/workspace
+uv run harness results --db demo.sqlite3 --run_id "$RUN_ID" --format table
 ```
 
-## Scoring
+This submits all three tasks using saved model responses, so no API key is needed. The worker processes all queued tasks in that database.
 
-Each task is scored as pass/fail (1.0 or 0.0) based on pytest results. The overall benchmark score is the percentage of tasks that pass all tests.
+For live-model setup and more CLI options, see the [main README](../../README.md).
+
+That's it. Three problems, three sets of tests, and a score for each one.
