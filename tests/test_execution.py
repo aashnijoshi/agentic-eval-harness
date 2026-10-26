@@ -31,7 +31,10 @@ def test_task_instructions_come_from_dataset(tmp_path):
         BashOperations(directory).load_task("unknown-task")
 
 
-def test_mini_receives_public_task_and_replay_without_credentials(monkeypatch):
+@pytest.mark.parametrize("benchmark_type,task_id", [
+    (kind, task_id) for kind in (BashOperations, PythonTasks) for task_id in kind().task_ids()
+])
+def test_mini_receives_public_task_and_replay_without_credentials(monkeypatch, benchmark_type, task_id):
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-forwarded")
     calls = {}
 
@@ -40,14 +43,68 @@ def test_mini_receives_public_task_and_replay_without_credentials(monkeypatch):
         return subprocess.CompletedProcess(arguments, 0, '{"status":"Submitted"}', "")
 
     container = SimpleNamespace(copy_in=lambda *_: None, execute=execute)
-    task = BashOperations().load_task("bash-001")
-    agent = MiniSweAgent(replay=RESPONSES)
+    benchmark = benchmark_type()
+    task = benchmark.load_task(task_id)
+    agent = MiniSweAgent(replay=PROJECT_ROOT / "tests/fixtures/task_responses.json")
     assert agent.run(container, task).status == "Submitted"
-    assert json.loads(calls["input"])["task"] == task.instructions
+    prompt = json.loads(calls["input"])["task"]
+    assert prompt.startswith(task.instructions)
+    for path in task.artifacts:
+        assert path in prompt
+    if all(path in task.instructions for path in task.artifacts):
+        assert prompt == task.instructions
+    else:
+        for path in task.artifacts:
+            assert prompt.count(path) == 1
+    if benchmark_type is PythonTasks:
+        assert benchmark.tasks[task_id]["test_code"] not in prompt
+    assert "test_solution.py" not in prompt
+    assert "test_code" not in prompt and "expected_content" not in prompt
     assert "verification" not in json.loads(calls["input"])
     assert calls["env_names"] == ()
     assert agent.network == "none"
     assert agent.secrets == ()
+
+
+def test_submission_path_comes_from_metadata_without_exposing_tests(tmp_path):
+    dataset = json.loads((PROJECT_ROOT / "benchmarks/python-tasks/dataset.json").read_text())
+    dataset[0]["solution_file"] = "answers/custom.py"
+    dataset[0]["test_code"] = "PRIVATE_GRADER_SENTINEL"
+    (tmp_path / "dataset.json").write_text(json.dumps(dataset))
+    task = PythonTasks(tmp_path).load_task(dataset[0]["id"])
+    calls = {}
+
+    def execute(arguments, **kwargs):
+        calls.update(kwargs)
+        return subprocess.CompletedProcess(arguments, 0, '{"status":"Submitted"}', "")
+
+    MiniSweAgent(replay=RESPONSES).run(SimpleNamespace(copy_in=lambda *_: None, execute=execute), task)
+    prompt = json.loads(calls["input"])["task"]
+    assert prompt.startswith(dataset[0]["prompt"])
+    assert "`answers/custom.py`" in prompt
+    assert "solution.py" not in prompt
+    assert "PRIVATE_GRADER_SENTINEL" not in calls["input"]
+
+
+@pytest.mark.parametrize("instructions,needs_path", [
+    ("Write to 'result.py'.", False),
+    ("There is an unrelated 'other_result.py'.", True),
+    ("There is an unrelated 'nested/result.py'.", True),
+])
+def test_submission_contract_does_not_duplicate_or_confuse_paths(instructions, needs_path):
+    task = Task("custom", instructions, "python:3.11-slim", ("result.py",))
+    calls = {}
+
+    def execute(arguments, **kwargs):
+        calls.update(kwargs)
+        return subprocess.CompletedProcess(arguments, 0, '{"status":"Submitted"}', "")
+
+    MiniSweAgent(replay=RESPONSES).run(SimpleNamespace(copy_in=lambda *_: None, execute=execute), task)
+    prompt = json.loads(calls["input"])["task"]
+    if needs_path:
+        assert "`result.py`" in prompt[len(instructions):]
+    else:
+        assert prompt == instructions
 
 
 def test_live_run_requires_explicit_configuration(monkeypatch):

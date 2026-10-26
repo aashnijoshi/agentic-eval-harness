@@ -70,8 +70,17 @@ class MiniSweAgent:
                 raise ValueError(f"No replay responses for task {task.task_id}")
             responses = responses[task.task_id]
         container.copy_in(Path(__file__).with_name("mini_runner.py"), "/mini_runner.py")
+        instructions = task.instructions
+        # Match complete paths, not a suffix of another filename or directory.
+        missing_paths = [
+            path for path in task.artifacts
+            if not re.search(rf"(?<![\w./-]){re.escape(path)}(?![\w./-])", instructions)
+        ]
+        if missing_paths:
+            instructions += "\n\nRequired submission artifact paths, relative to /workspace: "
+            instructions += ", ".join(f"`{path}`" for path in missing_paths) + "."
         request = {
-            "task": task.instructions, "model": self.model, "responses": responses,
+            "task": instructions, "model": self.model, "responses": responses,
             "step_limit": self.step_limit, "cost_limit": self.cost_limit,
         }
         process = container.execute(

@@ -116,6 +116,24 @@ def test_incorrect_submissions_fail_every_task(benchmark_type, task_id, tmp_path
     assert result.passed is False and result.score == 0.0
 
 
+@pytest.mark.parametrize("filename,passed", [("add.py", False), ("solution.py", True)])
+def test_step_limit_and_submission_path_are_separate_from_grade(filename, passed, tmp_path):
+    replay = tmp_path / "completion-after-output.json"
+    replay.write_text(json.dumps([
+        f"```bash\nprintf 'def add(): return 4\\n' > {filename} && "
+        "printf '4\\n' && echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```",
+    ]))
+    result = run_task(PythonTasks(), MiniSweAgent(replay=replay, step_limit=1), "py-001")
+    assert_clean(result)
+    assert result.execution_status == "completed", result.diagnostics
+    assert result.agent_status == "LimitsExceeded"
+    assert result.passed is passed and result.score == float(passed)
+    assert result.diagnostics["agent"]["model_calls"] == 1
+    assert set(result.diagnostics["artifacts"]) == {"solution.py"}
+    if not passed:
+        assert "cannot import name 'add' from 'solution'" in result.diagnostics["grading"]["stdout"]
+
+
 def test_agent_cannot_replace_trusted_grader(tmp_path):
     replay = tmp_path / "responses.json"
     replay.write_text(json.dumps([
