@@ -23,6 +23,10 @@ def main() -> None:
         if request["responses"] is not None:
             model = DeterministicModel(outputs=request["responses"], cost_per_call=0.0)
         else:
+            import litellm
+
+            # Provider-error help banners go to stdout; reserve it for result JSON.
+            litellm.suppress_debug_info = True
             model = get_model(request["model"], config.get("model", {}))
         config["agent"].update(
             step_limit=request["step_limit"], cost_limit=request["cost_limit"],

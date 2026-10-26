@@ -11,7 +11,7 @@ import pytest
 
 from agentic_harness.agents import MiniSweAgent
 from agentic_harness.benchmarks import BashOperations, PythonTasks, PROJECT_ROOT
-from agentic_harness.execution import run_benchmark, run_task
+from agentic_harness.execution import Container, run_benchmark, run_task
 
 RESPONSES = PROJECT_ROOT / "tests/fixtures/task_responses.json"
 CASES = [(kind, task_id) for kind in (BashOperations, PythonTasks) for task_id in kind().task_ids()]
@@ -29,6 +29,50 @@ def assert_clean(result):
     ], capture_output=True, text=True, check=True, timeout=15)
     assert containers.stdout.strip() == ""
     assert not result.diagnostics.get("cleanup_errors")
+
+
+@pytest.mark.parametrize("benchmark_type,task_id", [
+    (BashOperations, "bash-001"), (PythonTasks, "py-001"),
+])
+def test_live_provider_error_is_structured_and_redacted(benchmark_type, task_id, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "offline-dummy-key")
+    execute = Container.execute
+    bootstrap = """
+import importlib
+import os
+import runpy
+from unittest.mock import patch
+
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+from litellm.llms.openai.common_utils import OpenAIError
+provider = importlib.import_module("litellm.main").openai_chat_completions
+error = OpenAIError(status_code=401, message="Offline mocked rejection: offline-dummy-key")
+with patch.object(provider, "completion", side_effect=error) as mocked:
+    runpy.run_path("/mini_runner.py", run_name="__main__")
+    assert mocked.call_count == 1
+"""
+
+    def execute_with_mocked_provider(container, arguments, **kwargs):
+        if arguments == ["python", "-B", "/mini_runner.py"]:
+            arguments = ["python", "-B", "-c", bootstrap]
+        return execute(container, arguments, **kwargs)
+
+    monkeypatch.setattr(Container, "execute", execute_with_mocked_provider)
+    agent = MiniSweAgent(model="openai/gpt-5-mini")
+    # Even if the mock breaks, this container cannot contact a paid provider.
+    agent.network = "none"
+    result = run_task(benchmark_type(), agent, task_id)
+    assert_clean(result)
+    assert result.execution_status == result.agent_status == "error"
+    assert result.diagnostics["phase"] == "agent"
+    assert result.passed is None and result.score is None
+    assert "grading" not in result.diagnostics
+    outcome = result.diagnostics["agent"]
+    assert outcome["error"].startswith("AuthenticationError:")
+    assert "Offline mocked rejection: [REDACTED]" in outcome["error"]
+    assert outcome["model_calls"] == 0 and outcome["cost"] == 0.0
+    assert "JSONDecodeError" not in result.diagnostics["error"]
+    assert "offline-dummy-key" not in json.dumps(result.diagnostics)
 
 
 @pytest.mark.parametrize("benchmark_type,task_id", CASES, ids=[task_id for _, task_id in CASES])
