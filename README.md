@@ -117,19 +117,13 @@ uv run harness results \
 
 ## 4. What's happening under the hood?
 
-*Architecture diagram coming here once the Excalidraw export is ready.*
+![How the harness works](docs/architecture.svg)
 
-The flow is:
+[Edit the diagram in Excalidraw](docs/architecture.excalidraw)
 
-1. **Queue:** the CLI saves each task in SQLite and returns a run ID
-2. **Run:** a worker picks up tasks, with a configurable concurrency limit
-3. **Solve:** mini-swe-agent works inside its own Docker container
-4. **Grade:** the benchmark checks the submitted files in a separate trusted environment
-5. **Save:** the score, timing, model usage, and diagnostics go back into SQLite
+The CLI queues tasks in SQLite. A worker controls concurrency and runs mini-swe-agent in an isolated Docker container. After the agent finishes, only permitted solution artifacts go to the separate trusted grader. The worker saves results in SQLite for the CLI to retrieve. Grading code and tests stay out of the agent container.
 
-The important separation is between **the agent trying to solve a task** and **the benchmark deciding whether it succeeded**. Grading code and tests stay out of the agent container; only declared solution artifacts are copied back for grading.
-
-I kept the agent and benchmark interfaces small so another implementation could be added without rewriting the execution flow. Right now, the supported agent is mini-swe-agent.
+The agent and benchmark interfaces stay small so another implementation could be added without rewriting execution.
 
 ## 5. What did the real runs look like?
 
