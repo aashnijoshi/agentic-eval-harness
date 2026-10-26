@@ -119,8 +119,6 @@ uv run harness results \
 
 ![How the harness works](docs/architecture.svg)
 
-[Edit the diagram in Excalidraw](docs/architecture.excalidraw)
-
 The CLI queues tasks in SQLite. A worker controls concurrency and runs mini-swe-agent in an isolated Docker container. After the agent finishes, only permitted solution artifacts go to the separate trusted grader. The worker saves results in SQLite for the CLI to retrieve. Grading code and tests stay out of the agent container.
 
 The agent and benchmark interfaces stay small so another implementation could be added without rewriting execution.
