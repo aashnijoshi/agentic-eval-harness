@@ -275,7 +275,7 @@ def test_surviving_child_keeps_lock_after_coordinator_is_killed(tmp_path, offlin
     finally:
         release.set()
     wait_for(lambda: states(path, run_id) == ["completed"])
-    # Wait for the orphan to finish closing its inherited lock descriptor.
+    # Wait for the orphan to close its inherited lock
     def released():
         with open(str(path) + ".worker.lock", "r+") as lock:
             try:

@@ -71,7 +71,7 @@ class MiniSweAgent:
             responses = responses[task.task_id]
         container.copy_in(Path(__file__).with_name("mini_runner.py"), "/mini_runner.py")
         instructions = task.instructions
-        # Match complete paths while allowing sentence-final punctuation.
+        # Match a whole path, allowing a period at the end of a sentence
         missing_paths = [
             path for path in task.artifacts
             if not re.search(rf"(?<![\w./-]){re.escape(path)}(?![\w/-]|\.[\w./-])", instructions)

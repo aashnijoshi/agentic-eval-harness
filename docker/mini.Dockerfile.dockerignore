@@ -1,4 +1,4 @@
-# Only send dependency metadata, upstream agent source, and the smoke test.
+# Send only dependency metadata, upstream source, and the smoke test
 **
 !pyproject.toml
 !uv.lock

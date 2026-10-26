@@ -13,7 +13,7 @@ from minisweagent.models.test_models import DeterministicModel
 
 
 def main() -> None:
-    # Importing the real provider adapter also checks its runtime dependencies.
+    # Import the real provider adapter to check its dependencies
     assert LitellmModel is not None
     assert version("mini-swe-agent") == "1.17.5"
     with TemporaryDirectory(prefix="mini-smoke-", dir="/workspace") as workspace:

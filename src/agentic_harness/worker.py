@@ -47,7 +47,7 @@ def reconcile_worker(path: Path, worker_id: str, reason: str) -> None:
         pass
     else:
         raise RuntimeError("Worker PID is still alive; recovery refused")
-    # A killed worker may leave its docker CLI subprocesses in its private session.
+    # A dead worker can leave docker CLI processes in its process group
     try:
         os.killpg(int(pid), signal.SIGKILL)
     except ProcessLookupError:
@@ -64,8 +64,7 @@ def reconcile_worker(path: Path, worker_id: str, reason: str) -> None:
             "recovery": "Worker stopped; owned containers reconciled; task was not retried",
         })
         with Database(path) as db:
-            # Reuse the existing conditional completion operation: changing state
-            # atomically makes every later completion with this token stale.
+            # Conditional completion rejects later results from this stale claim
             db.finish_task(claim["task_execution_id"], claim["claim_token"], result, worker_id=worker_id)
 
 
@@ -74,8 +73,7 @@ def _interrupt(*_):
 
 
 def _worker(path: Path, nonce: str, stop, lock_fd: int) -> None:
-    # Only this process and its subprocesses enter this session; terminal Ctrl-C
-    # reaches the coordinator, which controls interruption of these workers.
+    # Give each child its own process group so the coordinator controls shutdown
     os.setsid()
     signal.signal(signal.SIGINT, _interrupt)
     signal.signal(signal.SIGTERM, _interrupt)
@@ -118,17 +116,16 @@ def _worker(path: Path, nonce: str, stop, lock_fd: int) -> None:
                 })
             result.diagnostics = redact(result.diagnostics, secrets)
             result.duration_seconds = max(result.duration_seconds, round(time.monotonic() - started, 3))
-            # Even a returned result can carry cleanup errors. Reconcile before
-            # committing it; failure leaves a running claim for the coordinator.
+            # Reconcile cleanup failures before saving; leave the claim running if cleanup fails
             if needs_cleanup or result.diagnostics.get("cleanup_errors"):
                 cleanup_claim(claim)
             db.finish_task(claim["task_execution_id"], claim["claim_token"], result, worker_id=worker_id)
     except BaseException:
-        # Do not let multiprocessing print an unredacted exception/traceback.
-        # The coordinator records the exit and reconciles any committed claim.
+        # Don't let multiprocessing print an unredacted traceback
+        # The coordinator will reconcile the claim
         os._exit(1)
     finally:
-        # Closing is essential: LOCK_UN would unlock the parent's shared lock too.
+        # Close our descriptor; LOCK_UN would also unlock the parent's shared lock
         os.close(lock_fd)
 
 
@@ -154,8 +151,8 @@ def run_workers(
         pass
     if path.stat().st_nlink != 1:
         raise ValueError("Hard-linked database files are unsupported")
-    # A sidecar is necessary: on macOS, flock on the database itself conflicts
-    # with SQLite's locks. Never unlink the sidecar (that would permit bypass).
+    # macOS SQLite locks conflict with flock on the database, so use a sidecar
+    # Never delete it while workers are running
     lock_fd = os.open(str(path) + ".worker.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -169,7 +166,7 @@ def run_workers(
     old_handlers = {}
 
     def request_stop(*_):
-        # Signal handlers must not acquire multiprocessing.Event's internal lock.
+        # Avoid taking Event's lock inside a signal handler
         nonlocal requested_stop
         requested_stop = True
 
@@ -199,7 +196,7 @@ def run_workers(
                 if not process.is_alive():
                     del processes[process]
                     reap(process, nonce, f"Worker exited with code {process.exitcode} before persisting a result")
-            # Close the connection BEFORE forking; no SQLite connection is shared.
+            # Close SQLite before forking so children don't share a connection
             with Database(path) as db:
                 queued = db.connection.execute("SELECT 1 FROM task_executions WHERE state = 'queued' LIMIT 1").fetchone()
             if queued:
@@ -215,14 +212,14 @@ def run_workers(
         stop.set()
         for process in processes:
             if process.is_alive():
-                process.terminate()  # Worker turns SIGTERM into cleanup-aware interruption.
+                process.terminate()  # SIGTERM lets the worker clean up
         deadline = time.monotonic() + shutdown_timeout
         cleanup_failures = []
         try:
             for process, nonce in processes.items():
                 process.join(max(0, deadline - time.monotonic()))
                 if process.is_alive():
-                    # Session is owned by this still-live child, never another worker.
+                    # Only kill the process group owned by this live child
                     try:
                         os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:

@@ -26,7 +26,7 @@ class ExecutionTimeout(ExecutionError):
 
 
 def docker(arguments: list[str], *, input: str | bytes | None = None, timeout=30, check=True):
-    # Spool command output to temporary files instead of buffering it in memory.
+    # Spool output so a noisy task doesn't fill host memory
     with TemporaryFile() as stdout, TemporaryFile() as stderr:
         try:
             process = subprocess.run(
@@ -78,7 +78,7 @@ class Container:
 
     def __enter__(self):
         try:
-            # Resolve the tag once so this execution uses a concrete local image ID.
+            # Resolve tags once so a running task keeps the same image
             self.image = docker(["image", "inspect", "--format", "{{.Id}}", self.image]).stdout.decode().strip()
             labels = ["--label", f"agentic-harness.execution={self.execution_id}"]
             if self.claim_token is not None:
@@ -112,7 +112,7 @@ class Container:
     def execute(self, arguments, *, input=None, env_names=(), timeout=30, check=True):
         command = ["exec", "-i", "--workdir", "/workspace"]
         for name in env_names:
-            # Forward the named variable, never its value in argv or diagnostics.
+            # Pass the variable name so the key stays out of argv
             command.extend(["--env", name])
         result = docker([*command, self.name, *arguments], input=input, timeout=timeout, check=check)
         return subprocess.CompletedProcess(
@@ -121,8 +121,8 @@ class Container:
         )
 
     def copy_in(self, source: Path, target: str):
-        # Host UID/GID would make seeded files unwritable under --cap-drop ALL.
-        # Normalize ownership in the archive instead of granting extra capabilities.
+        # Seed files must be writable with --cap-drop ALL
+        # Set archive ownership instead of granting extra capabilities
         def container_owner(member):
             member.uid = member.gid = 0
             member.uname = member.gname = "root"
@@ -149,7 +149,7 @@ class Container:
         extract_artifacts(result.stdout, directory)
 
     def stop(self):
-        # Stop every process before reading the final submission; don't reuse its OS.
+        # Stop all agent processes before collecting artifacts
         docker(["stop", "--time", "1", self.name])
 
 
@@ -157,8 +157,7 @@ def redact(value, secrets):
     if isinstance(value, str):
         for secret in secrets:
             value = value.replace(secret, "[REDACTED]")
-        # Providers may echo a masked or previously rotated OpenAI-style key;
-        # exact replacement of the current credential cannot remove those.
+        # Providers can echo masked or old keys that exact replacement misses
         return re.sub(r"\bsk-[A-Za-z0-9_.*…-]*[A-Za-z0-9_*…-]", "[REDACTED]", value)
     if isinstance(value, dict):
         return {key: redact(item, secrets) for key, item in value.items()}
@@ -204,7 +203,7 @@ def run_task(
                         raise ExecutionError(outcome.error or "Agent execution failed")
                     phase = "artifacts"
                     for path in task.artifacts:
-                        # docker cp archives a file by basename; preserve its declared parent.
+                        # docker cp uses basenames, so recreate the declared parent path
                         destination = artifacts / PurePosixPath(path).parent
                         destination.mkdir(parents=True, exist_ok=True)
                         sandbox.copy_out(f"/workspace/{path}", destination, missing_ok=True)

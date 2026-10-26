@@ -149,7 +149,7 @@ def test_competing_connections_claim_each_task_at_most_once(tmp_path, task_count
     assert all(claim["state"] == "running" and claim["claimed_at"] == claim["started_at"] for claim in actual)
     with Database(path) as db:
         assert db.claim_next("worker-c") is None
-        # A new writer can immediately acquire a lock while claimed work is pending.
+        # A claim must not hold the write lock during execution
         db.connection.execute("BEGIN IMMEDIATE")
         db.connection.rollback()
 
@@ -215,7 +215,7 @@ def test_task_id_must_match_claim_and_completion_cannot_happen_twice(db):
 def test_revoked_token_cannot_overwrite_a_new_claim_or_its_outcome(db):
     run_id = submit(db, ["bash-001"])
     old = db.claim_next("worker")
-    # Simulate a future explicit recovery operation. There is no requeue/retry API.
+    # Simulate explicit recovery; the harness never requeues automatically
     with db.connection:
         db.connection.execute("UPDATE task_executions SET claim_token = 'new-token', worker_id = 'new-worker'")
     newer = old | {"claim_token": "new-token", "worker_id": "new-worker"}
@@ -253,7 +253,7 @@ def test_results_and_old_running_claims_survive_reopen_without_retry(tmp_path):
         assert db.get_results(run_id).results == [success("bash-001")]
         assert [task["state"] for task in db.get_run(run_id)["tasks"]] == ["completed", "running"]
         assert db.claim_next("worker-c") is None
-        # The active token survives restart and can still finish its own task.
+        # The original token can still finish its task after reopening the database
         finish(db, running, success("bash-002"))
 
 
@@ -278,7 +278,7 @@ def test_aggregation_matches_synchronous_execution_and_preserves_error_grades(db
         "errors": 1, "timed_out": 1, "interrupted": 1, "accuracy": 0.2, "graded_accuracy": 0.5,
     }
     assert [task["error"] for task in db.get_run(run_id)["tasks"]] == [None, None, "agent timed out", "setup failed", "interrupted"]
-    # Cleanup can fail AFTER a grade was obtained; preserve that existing behavior.
+    # A cleanup error can coexist with a valid grade
     other = submit(db, ["bash-001"])
     finish(db, db.claim_next("worker"), replace(success("bash-001"), execution_status="error"))
     summary = db.get_results(other).summary
@@ -311,7 +311,7 @@ def test_secrets_are_not_copied_from_environment_or_arbitrary_config(tmp_path, m
                 submit(db, ["bash-001"], **extra)
         monkeypatch.delenv("OPENAI_API_KEY")
         monkeypatch.delenv("ANTHROPIC_API_KEY")
-        # Submission records intent; worker credentials are unnecessary at enqueue time.
+        # Queueing must not read worker credentials
         submit(db, ["bash-002"], replay=None, model="openai/example")
     assert secret.encode() not in path.read_bytes()
 

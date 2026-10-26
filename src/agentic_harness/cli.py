@@ -83,7 +83,7 @@ def read_report(path: Path, run_id: str) -> dict:
         })
     counts = {state: sum(task["state"] == state for task in tasks)
               for state in ("queued", "running", "completed", "error", "timed_out", "interrupted")}
-    counts["failed"] = results.summary["failed"]  # Incorrect solutions, not execution errors.
+    counts["failed"] = results.summary["failed"]  # Failed grades are separate from execution errors
     counts["passed"] = results.summary["passed"]
     if counts["running"]:
         state = "running"
@@ -92,11 +92,10 @@ def read_report(path: Path, run_id: str) -> dict:
     else:
         state = next((name for name in ("error", "timed_out", "interrupted") if counts[name]), "completed")
     finished = sum(counts[name] for name in ("completed", "error", "timed_out", "interrupted"))
-    # A partial measured total would understate usage. Keep it null until every
-    # selected task has a measurement; available per-task values remain visible.
+    # Leave totals unknown until every task has a measurement
     usage = {name: sum(task[name] for task in tasks) if all(task[name] is not None for task in tasks) else None
              for name in ("model_calls", "cost")}
-    # Protect display of legacy provider errors without rewriting saved records.
+    # Redact old provider errors without changing saved records
     return redact({
         "run_id": run_id, "agent": run["agent"], "benchmark": run["benchmark"],
         "created_at": run["created_at"], "config": run["config"], "state": state,

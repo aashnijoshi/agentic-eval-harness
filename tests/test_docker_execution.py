@@ -61,7 +61,7 @@ with patch.object(provider, "completion", side_effect=error) as mocked:
 
     monkeypatch.setattr(Container, "execute", execute_with_mocked_provider)
     agent = MiniSweAgent(model="openai/gpt-5-mini")
-    # Even if the mock breaks, this container cannot contact a paid provider.
+    # Networking is off even if the provider mock breaks
     agent.network = "none"
     result = run_task(benchmark_type(), agent, task_id)
     assert_clean(result)

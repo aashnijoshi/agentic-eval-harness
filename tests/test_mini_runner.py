@@ -29,8 +29,7 @@ def test_provider_error_preserves_runner_json(
     import litellm
     from litellm.llms.openai.common_utils import OpenAIError
 
-    # Leave completion(), mini's model, and exception mapping real; replace only
-    # the provider call that would otherwise send an HTTP request.
+    # Keep mini and LiteLLM error mapping real; mock only the provider request
     calls = []
 
     def reject(**kwargs):

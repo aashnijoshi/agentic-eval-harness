@@ -41,7 +41,7 @@ def test_submission_returns_without_execution_and_tasks_remain_durable(tmp_path,
     monkeypatch.setattr(execution, "run_task", lambda *_: pytest.fail("Must not execute during submission"))
     monkeypatch.setattr(cli, "run_workers", lambda *_, **__: pytest.fail("Must not start a worker during submission"))
     run_id = submit(path, "--task_ids", "bash-001,bash-002")
-    # Each CLI invocation opens and closes the database independently.
+    # Each CLI call opens a new connection
     status = report(path, run_id, "status")
     assert status["state"] == "queued" and status["counts"]["queued"] == 2
     assert status["progress"] == {"finished": 0, "total": 2, "fraction": 0.0}
@@ -90,7 +90,7 @@ def test_status_transitions_and_partial_usage_do_not_invent_measurements(tmp_pat
                             {"agent": {"model_calls": 3, "cost": 0.0}})
         db.finish_task(claim["task_execution_id"], claim["claim_token"], result, worker_id="test-worker")
     status = report(path, run_id, "status")
-    assert status["state"] == "queued"  # No active worker; more work remains.
+    assert status["state"] == "queued"  # More work remains, but no worker is active
     assert status["counts"]["completed"] == 1 and status["counts"]["failed"] == 0
     assert status["progress"]["finished"] == 1
     partial = report(path, run_id)
@@ -164,7 +164,7 @@ def test_worker_command_forwards_configuration_and_reports_conflicts(tmp_path, m
 @pytest.mark.parametrize("command", ["status", "results"])
 def test_missing_or_unknown_run_id_has_clear_error(tmp_path, command):
     path = tmp_path / "queue.sqlite3"
-    assert invoke(path, command).exit_code == 2  # Original contract required --run_id.
+    assert invoke(path, command).exit_code == 2  # --run_id is required
     result = invoke(path, command, "--run_id", "unknown")
     assert result.exit_code == 1 and "Unknown run" in result.output
 
@@ -185,7 +185,7 @@ def test_historical_provider_errors_are_safe_to_display_without_rewriting_record
     run_id = submit(path, "--task_ids", "bash-001")
     with Database(path) as db:
         claim = db.claim_next("test-worker")
-        # Simulate a legacy record written before the provider redaction fix.
+        # Seed an old record from before redaction
         db.finish_task(claim["task_execution_id"], claim["claim_token"], TaskResult(
             "bash-001", "error", "error", diagnostics={
                 "error": error, "agent": {"error": error, "messages": [{"content": error}]},
@@ -243,7 +243,7 @@ def test_all_eight_tasks_through_public_cli_survive_worker_restart(tmp_path):
             coordinator.terminate()
             coordinator.communicate(timeout=20)
     assert saw_running and maximum <= 2
-    # Restarting an empty coordinator must not execute completed work again.
+    # Restarting an empty queue must not repeat completed tasks
     restarted = command("worker", "--concurrency", "2", "--drain")
     assert restarted.returncode == 0, restarted.stderr
     for run_id, expected in zip(runs, (5, 3)):

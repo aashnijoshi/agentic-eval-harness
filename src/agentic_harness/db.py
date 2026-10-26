@@ -81,8 +81,7 @@ class Database:
         api_key_env: str = "OPENAI_API_KEY", timeout: float = 60,
         step_limit: int = 20, cost_limit: float = 1.0,
     ) -> str:
-        # Explicit fields prevent serializing an agent object, its secrets, or an
-        # arbitrary configuration dictionary containing provider credentials.
+        # Store explicit fields, never an agent object or its credentials
         if agent != "agents/mini-swe-agent" and Path(agent).resolve() != PROJECT_ROOT / "agents/mini-swe-agent":
             raise ValueError("Only agents/mini-swe-agent is supported")
         adapters = {"bash-operations": BashOperations, "python-tasks": PythonTasks}
@@ -117,7 +116,7 @@ class Database:
             raise ValueError("Timeout, step limit, and cost limit must be finite and positive")
         replay_path = str(Path(replay).resolve()) if replay is not None else None
         if replay_path is not None:
-            # Reuse mini's existing replay validation without requiring a key or Docker.
+            # Validate replay files before queueing; this needs no key or Docker
             mini = MiniSweAgent(replay=Path(replay_path), timeout=timeout, step_limit=step_limit, cost_limit=cost_limit)
             if isinstance(mini.responses, dict) and any(task_id not in mini.responses for task_id in selected):
                 raise ValueError("Replay mapping must contain every selected task")
@@ -126,7 +125,7 @@ class Database:
             "timeout": timeout, "step_limit": step_limit, "cost_limit": cost_limit,
         }
         run_id = uuid4().hex
-        # The connection context commits all inserts together, or rolls them all back.
+        # Commit the run and all tasks together, or roll everything back
         with self.connection:
             self.connection.execute(
                 "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
@@ -145,8 +144,7 @@ class Database:
         if not isinstance(worker_id, str) or not worker_id.strip():
             raise ValueError("Worker ID must be a nonempty string")
         with self.connection:
-            # Acquire the write lock BEFORE selecting. Other claimers wait until
-            # this transaction commits and then see the updated state.
+            # Take the write lock before selecting so another worker can't claim this task
             self.connection.execute("BEGIN IMMEDIATE")
             row = self.connection.execute(
                 """SELECT t.task_execution_id FROM task_executions AS t
@@ -168,7 +166,7 @@ class Database:
                 "SELECT * FROM task_executions WHERE task_execution_id = ?",
                 (row["task_execution_id"],),
             ).fetchone()
-        # No database transaction or lock survives the return to a future worker.
+        # Release the transaction before Docker or model work starts
         return dict(claim)
 
     def finish_task(

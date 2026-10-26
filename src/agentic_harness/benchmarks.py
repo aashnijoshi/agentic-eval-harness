@@ -79,7 +79,7 @@ class BashOperations:
         return Task(task_id, data["problem_statement"], data["docker_image"], artifacts)
 
     def prepare(self, container, task: Task) -> str:
-        # These files are copied only into the separate trusted container.
+        # Keep benchmark files in the trusted container
         container.execute(["mkdir", "-p", "/trusted"])
         for name in ("setup.py", "evaluate.py", "dataset.json"):
             container.copy_in(self.directory / name, f"/trusted/{name}")
@@ -97,8 +97,7 @@ class BashOperations:
 
 
 class PythonTasks:
-    # The already-built Python runtime supplies the locked pytest dependency.
-    # This is a fresh container, separate from the agent, with no credentials.
+    # Use the Python runtime for locked pytest in a fresh grader container
     grader_image = "harness-mini:python"
 
     def __init__(self, directory: Path | None = None):
@@ -129,7 +128,7 @@ class PythonTasks:
             "python", "-B", "/trusted/prepare.py", task.task_id,
             "--workspace", "/prepared", "--skip-install",
         ])
-        # Tests stay in /prepared in this container. Only the stub enters the agent.
+        # Keep tests here and give the agent only the solution stub
         container.execute(["cp", f"/prepared/{solution}", f"/workspace/{solution}"])
         return result.stdout
 
@@ -139,5 +138,5 @@ class PythonTasks:
             "python", "-B", "/trusted/grade.py", task.task_id,
             "--workspace", "/submission",
         ], check=False, timeout=40)
-        # grade.py exits zero for both correct and incorrect solutions.
+        # A zero exit status can still mean a failed grade
         return parse_grade(process, task, failed_exit_code=0)

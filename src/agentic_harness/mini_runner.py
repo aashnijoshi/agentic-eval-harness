@@ -25,7 +25,7 @@ def main() -> None:
         else:
             import litellm
 
-            # Provider-error help banners go to stdout; reserve it for result JSON.
+            # Keep provider help banners out of the JSON output
             litellm.suppress_debug_info = True
             model = get_model(request["model"], config.get("model", {}))
         config["agent"].update(
